@@ -1,0 +1,20 @@
+BatchSvr:
+  envs:
+    DEV:
+      SolanaLpAprCron: 0 0 0/1 * * ?
+      SolanaLpAprHourlyInterval: 1
+    QA:
+      SolanaLpAprCron: 0 0 0,6,12,18 * * ?
+      SolanaLpAprHourlyInterval: 6
+    DEV12:
+      SolanaLpAprCron: 0 0 0,6,12,18 * * ?
+      SolanaLpAprHourlyInterval: 6
+    DEV11:
+      SolanaLpAprCron: 0 0 0,6,12,18 * * ?
+      SolanaLpAprHourlyInterval: 6
+    UAT:
+      SolanaLpAprCron: 0 0 0,6,12,18 * * ?
+      SolanaLpAprHourlyInterval: 6
+    PROD:
+      SolanaLpAprCron: 0 0 0,6,12,18 * * ?
+      SolanaLpAprHourlyInterval: 6
