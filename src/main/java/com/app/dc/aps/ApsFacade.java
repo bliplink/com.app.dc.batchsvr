@@ -1,21 +1,15 @@
 package com.app.dc.aps;
 
-import java.util.ArrayList;
-import java.util.Hashtable;
-import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
 
-import com.app.dc.fix.message.MarketDataSnapshotFullRefresh;
-import lombok.Getter;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
-import com.app.common.utils.JsonUtils;
-import com.app.dc.data.DataFacade;
-import com.app.dc.po.SolanaCategoryDPrice;
+import com.app.dc.fix.message.MarketDataSnapshotFullRefresh;
 import com.app.dc.utils.ApsSvrClient;
 import com.gw.common.utils.BaseApi;
 
+import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
 
 @Slf4j
