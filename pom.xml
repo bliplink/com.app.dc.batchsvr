@@ -11,7 +11,7 @@
 		<dependency>
 			<groupId>com.app.dc</groupId>
 			<artifactId>com.app.dc</artifactId>
-			<version>0.0.2-SNAPSHOT</version>
+			<version>0.0.3-SNAPSHOT</version>
 		</dependency>
 		<dependency>
 			<groupId>org.projectlombok</groupId>

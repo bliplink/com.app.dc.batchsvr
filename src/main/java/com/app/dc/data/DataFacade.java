@@ -46,13 +46,13 @@ public class DataFacade {
 //			symbol.setQtyPrecision(t.qty_precision);
 //			symbol.setTakerCommission(new BigDecimal(t.taker_commission));
 //			symbol.setMakerCommission(new BigDecimal(t.maker_commission));
-			symbol.setSymbolLevel1Category(t.symbol_level1_category);
-			symbol.setSymbolLevel2Category(t.symbol_level2_category);
-			symbol.setMinimumMaintainanceCr(t.minimum_maintainance_cr);
-			symbol.setMinimumInitialCr(t.minimum_initial_cr);
-			symbol.setExpiried(t.expiration);
-			symbol.setDueDate(t.due_date);
-			symbol.setProtocolFeeRate(t.protocol_fee_rate);
+//			symbol.setSymbolLevel1Category(t.symbol_level1_category);
+//			symbol.setSymbolLevel2Category(t.symbol_level2_category);
+//			symbol.setMinimumMaintainanceCr(t.minimum_maintainance_cr);
+//			symbol.setMinimumInitialCr(t.minimum_initial_cr);
+//			symbol.setExpiried(t.expiration);
+//			symbol.setDueDate(t.due_date);
+//			symbol.setProtocolFeeRate(t.protocol_fee_rate);
 			ht.put(symbol.getSecurityID(), symbol);
 			htSymbol2.put(symbol.getSymbol(), symbol);
 
