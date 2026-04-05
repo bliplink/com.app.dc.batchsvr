@@ -5,7 +5,7 @@ import java.util.Date;
 
 import com.app.dc.utils.DateUtil;
 
-import com.alibaba.fastjson.annotation.JSONField;
+import com.alibaba.fastjson2.annotation.JSONField;
 
 public class Symbol {
 	private String securityID;//

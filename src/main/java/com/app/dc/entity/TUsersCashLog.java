@@ -1,6 +1,6 @@
 package com.app.dc.entity;
 
-import com.alibaba.fastjson.annotation.JSONField;
+import com.alibaba.fastjson2.annotation.JSONField;
 
 import java.math.BigDecimal;
 

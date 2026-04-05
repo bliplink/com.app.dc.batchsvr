@@ -3,7 +3,7 @@ package com.app.dc.entity;
 import java.math.BigDecimal;
 import java.sql.Timestamp;
 import java.util.Date;
-import com.alibaba.fastjson.annotation.JSONField;
+import com.alibaba.fastjson2.annotation.JSONField;
 import lombok.Data;
 
 @Data
@@ -19,7 +19,7 @@ public class TOrdersExecorders {
     @JSONField(name = "exec_id",serialize=true)
     public String exec_id = "";//
     @JSONField(name = "exec_type",serialize=true)
-    public String exec_type;//7：Taker，6：Maker
+    public String exec_type;//7锛歍aker锛�6锛歁aker
     @JSONField(name = "fee",serialize=true)
     public BigDecimal fee;//
     @JSONField(name = "info1",serialize=true)

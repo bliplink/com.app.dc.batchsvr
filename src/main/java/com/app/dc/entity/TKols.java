@@ -3,9 +3,10 @@ package com.app.dc.entity;
 import java.math.BigDecimal;
 import java.sql.Timestamp;
 import java.util.Date;
-import com.alibaba.fastjson.annotation.JSONField;
+import com.alibaba.fastjson2.annotation.JSONField;
 
 public class TKols {
+	
     @JSONField(name = "close_by",serialize=true)
     public String close_by;
     @JSONField(name = "create_time",serialize=true)

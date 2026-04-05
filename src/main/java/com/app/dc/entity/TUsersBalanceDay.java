@@ -3,7 +3,7 @@ package com.app.dc.entity;
 import java.math.BigDecimal;
 import java.sql.Timestamp;
 import java.util.Date;
-import com.alibaba.fastjson.annotation.JSONField;
+import com.alibaba.fastjson2.annotation.JSONField;
 
 public class TUsersBalanceDay {
     @JSONField(name = "account_id",serialize=true)

@@ -3,8 +3,7 @@ package com.app.dc.entity;
 import java.math.BigDecimal;
 import java.sql.Timestamp;
 import java.util.Date;
-import com.alibaba.fastjson.annotation.JSONField;
-
+import com.alibaba.fastjson2.annotation.JSONField;
 public class TKolsRptDetail {
     @JSONField(name = "create_time",serialize=true)
     public String create_time;
