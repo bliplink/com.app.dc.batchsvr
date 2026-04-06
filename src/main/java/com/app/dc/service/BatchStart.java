@@ -15,6 +15,13 @@ import com.app.common.utils.Schedule;
 import com.app.dc.aps.ApsFacade;
 import com.app.dc.data.DataFacade;
 import com.app.dc.price.MarketPriceFacade;
+import com.app.dc.service.externalsource.ExternalSourceFacade;
+import com.app.dc.service.job.ExternalSourceDigestReportJob;
+import com.app.dc.service.job.ExternalSourceDispatchJob;
+import com.app.dc.service.job.ExternalSourceNormalizeJob;
+import com.app.dc.service.job.FmzDiscoverJob;
+import com.app.dc.service.job.GitHubDiscoverJob;
+import com.app.dc.service.job.TradingViewDiscoverJob;
 import com.app.dc.util.Consts;
 import com.app.dc.utils.TradeSvrClient;
 
@@ -46,6 +53,9 @@ public class BatchStart implements CommandLineRunner {
 	@Autowired
 	public MarketPriceFacade marketPriceFacade;
 
+	@Autowired
+	private ExternalSourceFacade externalSourceFacade;
+
 	@Value("${RewardRateEnabled}")
 	private boolean RewardRateEnabled;
 
@@ -76,6 +86,42 @@ public class BatchStart implements CommandLineRunner {
 	@Value("${RakeBackConvert}")
 	@Getter
 	private String RakeBackConvert;
+
+	@Value("${clickhouse.default:}")
+	private String clickHouseDefault;
+
+	@Value("${external.source.enabled:true}")
+	private boolean externalSourceEnabled;
+
+	@Value("${external.source.dispatch.enabled:false}")
+	private boolean externalSourceDispatchEnabled;
+
+	@Value("${external.tradingview.enabled:true}")
+	private boolean tradingViewEnabled;
+
+	@Value("${external.fmz.enabled:true}")
+	private boolean fmzEnabled;
+
+	@Value("${external.github.enabled:true}")
+	private boolean gitHubEnabled;
+
+	@Value("${external.tradingview.cron:0 0 0/2 * * ?}")
+	private String tradingViewCron;
+
+	@Value("${external.fmz.cron:0 10 0/2 * * ?}")
+	private String fmzCron;
+
+	@Value("${external.github.cron:0 20 0/2 * * ?}")
+	private String gitHubCron;
+
+	@Value("${external.normalize.cron:0 0/30 * * * ?}")
+	private String externalNormalizeCron;
+
+	@Value("${external.dispatch.cron:0 15/30 * * * ?}")
+	private String externalDispatchCron;
+
+	@Value("${external.digest.cron:0 30 8 * * ?}")
+	private String externalDigestCron;
 
 	@Override
 	public void run(String... args) throws Exception {
@@ -115,12 +161,14 @@ public class BatchStart implements CommandLineRunner {
 		Thread.sleep(15000);
 		log.info("BachCount:{}", Consts.BachCount);
 		log.info("Schedule.Config:{}", scheduleConfig);
+		logExternalSourceConfig();
 
 		schedule.init(scheduleConfig);
 		//runYesterdaysDataJob();
 
 	
 		schedule.start();
+		registerExternalSourceJobs();
 	}
 
 	
@@ -132,5 +180,77 @@ public class BatchStart implements CommandLineRunner {
 //		}
 //	}
 
-	
+	public int runTradingViewDiscoverJob() {
+		log.info("runTradingViewDiscoverJob start");
+		int count = externalSourceFacade.discoverTradingView();
+		log.info("runTradingViewDiscoverJob end, discovered:{}", count);
+		return count;
+	}
+
+	public int runFmzDiscoverJob() {
+		log.info("runFmzDiscoverJob start");
+		int count = externalSourceFacade.discoverFmz();
+		log.info("runFmzDiscoverJob end, discovered:{}", count);
+		return count;
+	}
+
+	public int runGitHubDiscoverJob() {
+		log.info("runGitHubDiscoverJob start");
+		int count = externalSourceFacade.discoverGitHub();
+		log.info("runGitHubDiscoverJob end, discovered:{}", count);
+		return count;
+	}
+
+	public int runExternalNormalizeJob() {
+		log.info("runExternalNormalizeJob start");
+		int count = externalSourceFacade.normalizeReady();
+		log.info("runExternalNormalizeJob end, processed:{}", count);
+		return count;
+	}
+
+	public int runExternalDispatchJob() {
+		log.info("runExternalDispatchJob start");
+		int count = externalSourceFacade.dispatchReady();
+		log.info("runExternalDispatchJob end, dispatched:{}", count);
+		return count;
+	}
+
+	public String runExternalDigestJob() {
+		log.info("runExternalDigestJob start");
+		String path = externalSourceFacade.writeDigestReport();
+		log.info("runExternalDigestJob end, report:{}", path);
+		return path;
+	}
+
+	private void registerExternalSourceJobs() {
+		if (!externalSourceEnabled) {
+			log.info("external source jobs skipped, enabled:false");
+			return;
+		}
+		if (tradingViewEnabled) {
+			schedule.updateJob(tradingViewCron, "tradingViewDiscoverJob", TradingViewDiscoverJob.class, this);
+		}
+		if (fmzEnabled) {
+			schedule.updateJob(fmzCron, "fmzDiscoverJob", FmzDiscoverJob.class, this);
+		}
+		if (gitHubEnabled) {
+			schedule.updateJob(gitHubCron, "gitHubDiscoverJob", GitHubDiscoverJob.class, this);
+		}
+		schedule.updateJob(externalNormalizeCron, "externalSourceNormalizeJob", ExternalSourceNormalizeJob.class, this);
+		schedule.updateJob(externalDigestCron, "externalSourceDigestReportJob", ExternalSourceDigestReportJob.class, this);
+		if (externalSourceDispatchEnabled) {
+			externalSourceFacade.initDispatchClientIfNeeded();
+			schedule.updateJob(externalDispatchCron, "externalSourceDispatchJob", ExternalSourceDispatchJob.class, this);
+		} else {
+			log.info("external source dispatch job disabled by config");
+		}
+	}
+
+	private void logExternalSourceConfig() {
+		log.info("external source config enabled:{} dispatchEnabled:{} clickHouseDefault:{} tradingViewEnabled:{} fmzEnabled:{} gitHubEnabled:{} tradingViewCron:{} fmzCron:{} gitHubCron:{} normalizeCron:{} dispatchCron:{} digestCron:{}",
+				externalSourceEnabled, externalSourceDispatchEnabled, clickHouseDefault, tradingViewEnabled, fmzEnabled,
+				gitHubEnabled, tradingViewCron, fmzCron, gitHubCron, externalNormalizeCron, externalDispatchCron,
+				externalDigestCron);
+	}
+
 }
