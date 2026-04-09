@@ -35,12 +35,46 @@ public class ClickHouseExternalSourceDao {
             return false;
         }
         String sql = "select count() as total from " + safeRawTable()
-                + " where source_type=? and external_id=? and content_hash=? limit 1";
+                + " where source_type='" + escape(sourceType) + "'"
+                + " and external_id='" + escape(externalId) + "'"
+                + " and content_hash='" + escape(contentHash) + "'";
         try {
-            List<CountRow> rows = ClickHouseDBUtils.queryList(sql, new Object[]{sourceType, externalId, contentHash}, CountRow.class);
+            List<CountRow> rows = ClickHouseDBUtils.queryList(sql, new Object[]{}, CountRow.class);
             return rows != null && !rows.isEmpty() && rows.get(0).total != null && rows.get(0).total > 0;
         } catch (Exception e) {
             log.error("existsSameRawContent error, sourceType:{}, externalId:{}", sourceType, externalId, e);
+            return false;
+        }
+    }
+
+    public boolean existsRawByExternalId(String sourceType, String externalId) {
+        if (!ready() || StringUtils.isBlank(sourceType) || StringUtils.isBlank(externalId)) {
+            return false;
+        }
+        String sql = "select count() as total from " + safeRawTable()
+                + " where source_type='" + escape(sourceType) + "'"
+                + " and external_id='" + escape(externalId) + "'";
+        try {
+            List<CountRow> rows = ClickHouseDBUtils.queryList(sql, new Object[]{}, CountRow.class);
+            return rows != null && !rows.isEmpty() && rows.get(0).total != null && rows.get(0).total > 0;
+        } catch (Exception e) {
+            log.error("existsRawByExternalId error, sourceType:{}, externalId:{}", sourceType, externalId, e);
+            return false;
+        }
+    }
+
+    public boolean existsRawByCanonicalUrl(String sourceType, String canonicalUrl) {
+        if (!ready() || StringUtils.isBlank(sourceType) || StringUtils.isBlank(canonicalUrl)) {
+            return false;
+        }
+        String sql = "select count() as total from " + safeRawTable()
+                + " where source_type='" + escape(sourceType) + "'"
+                + " and canonical_url='" + escape(canonicalUrl) + "'";
+        try {
+            List<CountRow> rows = ClickHouseDBUtils.queryList(sql, new Object[]{}, CountRow.class);
+            return rows != null && !rows.isEmpty() && rows.get(0).total != null && rows.get(0).total > 0;
+        } catch (Exception e) {
+            log.error("existsRawByCanonicalUrl error, sourceType:{}, canonicalUrl:{}", sourceType, canonicalUrl, e);
             return false;
         }
     }
@@ -81,6 +115,54 @@ public class ClickHouseExternalSourceDao {
             });
         } catch (Exception e) {
             log.error("insertRaw error, id:{}", row.id, e);
+        }
+    }
+
+    public boolean insertRawIfAbsent(RawRecord row) {
+        if (!ready() || row == null) {
+            return false;
+        }
+        String sql = "insert into " + safeRawTable()
+                + " (id, source_name, source_url, source_type, title, category_raw, logic_raw, market_raw, symbol_scope_raw,"
+                + " crawl_time, source_hash, payload, status, site_name, external_id, canonical_url, author, published_time,"
+                + " update_time, content_hash, content, create_time)"
+                + " select ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?"
+                + " from system.one where not exists (select 1 from " + safeRawTable()
+                + " where source_type=? and (external_id=? or canonical_url=? or (external_id=? and content_hash=?)) limit 1)";
+        try {
+            ClickHouseDBUtils.update(sql, new Object[]{
+                    row.id,
+                    row.sourceName,
+                    row.sourceUrl,
+                    row.sourceType,
+                    row.title,
+                    "",
+                    ExternalSourceUtils.summarizeLogic(row.content),
+                    "crypto",
+                    "ALL",
+                    toDateTimeOrNull(row.createTime),
+                    row.contentHash,
+                    row.payload,
+                    row.status,
+                    row.siteName,
+                    row.externalId,
+                    row.canonicalUrl,
+                    row.author,
+                    toDateTimeOrNull(row.publishedTime),
+                    toDateTimeOrNull(row.externalUpdateTime),
+                    row.contentHash,
+                    row.content,
+                    toDateTimeOrNull(row.createTime),
+                    row.sourceType,
+                    row.externalId,
+                    row.canonicalUrl,
+                    row.externalId,
+                    row.contentHash
+            });
+            return existsRawId(row.id);
+        } catch (Exception e) {
+            log.error("insertRawIfAbsent error, id:{}", row.id, e);
+            return false;
         }
     }
 
@@ -147,14 +229,30 @@ public class ClickHouseExternalSourceDao {
             return false;
         }
         String sql = "select count() as total from " + safeNormTable()
-                + " where scene=? and strategy_name=? and fingerprint=? limit 1";
+                + " where scene='" + escape(scene) + "'"
+                + " and strategy_name='" + escape(strategyName) + "'"
+                + " and fingerprint='" + escape(fingerprint) + "'";
         try {
-            List<CountRow> rows = ClickHouseDBUtils.queryList(sql,
-                    new Object[]{scene, strategyName, fingerprint},
-                    CountRow.class);
+            List<CountRow> rows = ClickHouseDBUtils.queryList(sql, new Object[]{}, CountRow.class);
             return rows != null && !rows.isEmpty() && rows.get(0).total != null && rows.get(0).total > 0;
         } catch (Exception e) {
             log.error("existsNormFingerprint error, strategyName:{}, fingerprint:{}", strategyName, fingerprint, e);
+            return false;
+        }
+    }
+
+    public boolean existsNormByCanonicalUrl(String sourceType, String canonicalUrl) {
+        if (!ready() || StringUtils.isBlank(sourceType) || StringUtils.isBlank(canonicalUrl)) {
+            return false;
+        }
+        String sql = "select count() as total from " + safeNormTable()
+                + " where source_type='" + escape(sourceType) + "'"
+                + " and canonical_url='" + escape(canonicalUrl) + "'";
+        try {
+            List<CountRow> rows = ClickHouseDBUtils.queryList(sql, new Object[]{}, CountRow.class);
+            return rows != null && !rows.isEmpty() && rows.get(0).total != null && rows.get(0).total > 0;
+        } catch (Exception e) {
+            log.error("existsNormByCanonicalUrl error, sourceType:{}, canonicalUrl:{}", sourceType, canonicalUrl, e);
             return false;
         }
     }
@@ -199,6 +297,58 @@ public class ClickHouseExternalSourceDao {
             });
         } catch (Exception e) {
             log.error("insertNorm error, id:{}", row.id, e);
+        }
+    }
+
+    public boolean insertNormIfAbsent(NormRecord row) {
+        if (!ready() || row == null) {
+            return false;
+        }
+        String sql = "insert into " + safeNormTable()
+                + " (id, raw_id, normalized_strategy_name, category, scene, logic_summary, logic_structured_json,"
+                + " market_scope, symbol_scope, dedup_key, llm_model, normalize_time, payload, status, content,"
+                + " strategy_name, description, create_time, normalized_title, source_type, site_name, canonical_url,"
+                + " raw_content_hash, fingerprint, update_time)"
+                + " select ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?"
+                + " from system.one where not exists (select 1 from " + safeNormTable()
+                + " where (scene=? and strategy_name=? and fingerprint=?) or (source_type=? and canonical_url=?) limit 1)";
+        try {
+            ClickHouseDBUtils.update(sql, new Object[]{
+                    row.id,
+                    row.rawId,
+                    row.strategyName,
+                    row.scene,
+                    row.scene,
+                    ExternalSourceUtils.summarizeLogic(row.content),
+                    row.payload,
+                    "crypto-usdt",
+                    "ALL",
+                    row.fingerprint,
+                    "rule-based",
+                    toDateTimeOrNull(row.updateTime),
+                    row.payload,
+                    row.status,
+                    row.content,
+                    row.strategyName,
+                    row.description,
+                    toDateTimeOrNull(row.createTime),
+                    row.normalizedTitle,
+                    row.sourceType,
+                    row.siteName,
+                    row.canonicalUrl,
+                    row.rawContentHash,
+                    row.fingerprint,
+                    toDateTimeOrNull(row.updateTime),
+                    row.scene,
+                    row.strategyName,
+                    row.fingerprint,
+                    row.sourceType,
+                    row.canonicalUrl
+            });
+            return existsNormId(row.id);
+        } catch (Exception e) {
+            log.error("insertNormIfAbsent error, id:{}", row.id, e);
+            return false;
         }
     }
 
@@ -288,6 +438,34 @@ public class ClickHouseExternalSourceDao {
 
     public List<NormRecord> loadLatestNormSamples(String status, int limit) {
         return pullLatestNormByStatus(status, limit);
+    }
+
+    private boolean existsRawId(String id) {
+        if (!ready() || StringUtils.isBlank(id)) {
+            return false;
+        }
+        String sql = "select id as id from " + safeRawTable() + " where id='" + escape(id) + "' limit 1";
+        try {
+            List<RawRecord> rows = ClickHouseDBUtils.queryList(sql, new Object[]{}, RawRecord.class);
+            return rows != null && !rows.isEmpty();
+        } catch (Exception e) {
+            log.error("existsRawId error, id:{}", id, e);
+            return false;
+        }
+    }
+
+    private boolean existsNormId(String id) {
+        if (!ready() || StringUtils.isBlank(id)) {
+            return false;
+        }
+        String sql = "select id as id from " + safeNormTable() + " where id='" + escape(id) + "' limit 1";
+        try {
+            List<NormRecord> rows = ClickHouseDBUtils.queryList(sql, new Object[]{}, NormRecord.class);
+            return rows != null && !rows.isEmpty();
+        } catch (Exception e) {
+            log.error("existsNormId error, id:{}", id, e);
+            return false;
+        }
     }
 
     private List<CountRow> countLatest(String type, String since) {

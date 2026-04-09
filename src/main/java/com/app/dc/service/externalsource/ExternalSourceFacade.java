@@ -8,6 +8,7 @@ import com.app.dc.service.externalsource.ExternalSourceModels.SourceType;
 import com.app.dc.utils.INDSvrClient;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
+import org.jsoup.HttpStatusException;
 import org.jsoup.nodes.Document;
 import org.jsoup.nodes.Element;
 import org.jsoup.select.Elements;
@@ -34,12 +35,25 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 @Service
 @Slf4j
 public class ExternalSourceFacade {
 
     private static final DateTimeFormatter TS = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
+    private static final Pattern FMZ_SITEMAP_PATTERN = Pattern.compile("https://www\\.fmz\\.com/sitemap_\\d+\\.xml");
+    private static final Pattern FMZ_STRATEGY_PATTERN = Pattern.compile("https://www\\.fmz\\.com/strategy/\\d+");
+    private static final Pattern TRADINGVIEW_ENGLISH_TIME_PATTERN = Pattern.compile(
+            "([A-Z][a-z]{2,8} \\d{1,2}, \\d{4}(?:, \\d{1,2}:\\d{2}(?::\\d{2})?(?: ?(?:AM|PM|UTC))?)?)");
+    private static final Pattern GITHUB_HTML_REPO_PATH_PATTERN = Pattern.compile("^/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$");
+    private static final Set<String> GITHUB_NON_REPO_ROOTS = new LinkedHashSet<String>(Arrays.asList(
+            "about", "account", "apps", "blog", "collections", "contact", "copilot", "customer-stories",
+            "enterprise", "events", "explore", "features", "gist", "gists", "github", "issues", "login",
+            "logout", "marketplace", "new", "notifications", "orgs", "organizations", "pricing", "pulls",
+            "readme", "search", "security", "settings", "signup", "site", "sponsors", "team", "topics", "users"
+    ));
 
     @Autowired
     private ClickHouseExternalSourceDao externalSourceDao;
@@ -82,6 +96,12 @@ public class ExternalSourceFacade {
 
     @Value("${external.github.readmeLimit:15}")
     private int githubReadmeLimit;
+
+    @Value("${external.github.htmlQuerySleepMs:3000}")
+    private long githubHtmlQuerySleepMs;
+
+    @Value("${external.github.htmlRetryDelayMs:5000}")
+    private long githubHtmlRetryDelayMs;
 
     @Value("${external.github.queries:crypto trading strategy|binance futures strategy|cryptocurrency trading bot|pinescript crypto strategy|tradingview strategy crypto}")
     private String githubQueries;
@@ -139,20 +159,27 @@ public class ExternalSourceFacade {
             return 0;
         }
         int discovered = 0;
-        Set<String> detailUrls = new LinkedHashSet<String>();
-        for (int page = 1; page <= Math.max(1, fmzPageLimit); page++) {
-            Document doc = loadFirstDocument(new String[]{
-                    "https://www.fmz.com/strategy?p=" + page,
-                    "https://www.fmz.com/strategy?page=" + page,
-                    page == 1 ? "https://www.fmz.com/strategy" : "https://www.fmz.com/strategy"
-            });
-            if (doc == null) {
-                continue;
+        int targetCount = Math.max(1, fmzPageLimit) * 20;
+        Set<String> detailUrls = loadFmzStrategyUrls(targetCount);
+        if (detailUrls.isEmpty()) {
+            log.warn("ExternalSourceFacade discoverFmz sitemap returned empty, fallback to legacy list pages");
+            for (int page = 1; page <= Math.max(1, fmzPageLimit); page++) {
+                Document doc = loadFirstDocument(new String[]{
+                        "https://www.fmz.com/strategy?p=" + page,
+                        "https://www.fmz.com/strategy?page=" + page,
+                        "https://www.fmz.com/strategy"
+                });
+                if (doc == null) {
+                    continue;
+                }
+                detailUrls.addAll(extractLinks(doc.select("a[href]"), "https://www.fmz.com", "/strategy/"));
+                if (detailUrls.size() >= targetCount) {
+                    break;
+                }
             }
-            detailUrls.addAll(extractLinks(doc.select("a[href]"), "https://www.fmz.com", "/strategy/"));
         }
         for (String url : detailUrls) {
-            discovered += captureFmzDetail(url);
+            discovered += captureFmzDetailV2(url);
         }
         log.info("ExternalSourceFacade discoverFmz done, detailCount:{}, discovered:{}", detailUrls.size(), discovered);
         return discovered;
@@ -165,70 +192,55 @@ public class ExternalSourceFacade {
         int discovered = 0;
         int remaining = Math.max(1, githubRepoLimit);
         int enriched = 0;
+        Set<String> seenRepos = new LinkedHashSet<String>();
         for (String query : resolveGithubQueries()) {
             if (remaining <= 0) {
                 break;
             }
-            int perPage = Math.min(remaining, 20);
-            String q = query
-                    + " archived:false fork:false stars:>=" + Math.max(0, githubMinStars)
-                    + " pushed:>=" + LocalDate.now().minusDays(Math.max(1, githubQueryWindowDays));
-            String url = "https://api.github.com/search/repositories?q="
-                    + encodeUtf8(q)
-                    + "&sort=updated&order=desc&per_page=" + perPage + "&page=1";
-            try {
-                Map<String, Object> response = httpSupport.getJsonObject(url, githubHeaders("application/vnd.github+json"));
-                Object itemsObj = response.get("items");
-                if (!(itemsObj instanceof List)) {
+            int queryLimit = Math.min(remaining, 20);
+            List<GitHubRepoSnapshot> snapshots = discoverGitHubByApi(query, queryLimit);
+            boolean usedHtmlFallback = false;
+            if (snapshots.isEmpty()) {
+                snapshots = discoverGitHubByHtml(query, queryLimit);
+                usedHtmlFallback = true;
+            }
+            for (GitHubRepoSnapshot snapshot : snapshots) {
+                if (remaining <= 0) {
+                    break;
+                }
+                if (!seenRepos.add(snapshot.fullName)) {
                     continue;
                 }
-                @SuppressWarnings("unchecked")
-                List<Map<String, Object>> items = (List<Map<String, Object>>) itemsObj;
-                for (Map<String, Object> item : items) {
-                    if (remaining <= 0) {
-                        break;
-                    }
-                    String fullName = text(item.get("full_name"));
-                    String htmlUrl = text(item.get("html_url"));
-                    String title = fullName;
-                    String author = text(item.get("owner") instanceof Map ? ((Map<?, ?>) item.get("owner")).get("login") : "");
-                    String description = text(item.get("description"));
-                    String updatedAt = normalizeIsoDateTime(text(item.get("updated_at")));
-                    String publishedAt = normalizeIsoDateTime(text(item.get("created_at")));
-                    String defaultBranch = text(item.get("default_branch"));
-                    StringBuilder content = new StringBuilder();
-                    content.append(description);
-                    if (enriched < Math.max(1, githubReadmeLimit)) {
-                        String readme = fetchGitHubReadme(fullName);
-                        if (StringUtils.isNotBlank(readme)) {
-                            content.append("\nREADME: ").append(ExternalSourceUtils.truncate(readme, 8000));
-                        }
-                        if (StringUtils.isNotBlank(githubToken)) {
-                            List<String> snippets = fetchGitHubFileSnippets(fullName);
-                            for (String snippet : snippets) {
-                                content.append("\nFILE: ").append(ExternalSourceUtils.truncate(snippet, 2500));
-                            }
-                        }
-                        enriched++;
-                    }
-                    Map<String, Object> payload = new LinkedHashMap<String, Object>();
-                    payload.put("sourceType", SourceType.GITHUB.name());
-                    payload.put("siteName", SourceType.GITHUB.siteName());
-                    payload.put("fullName", fullName);
-                    payload.put("htmlUrl", htmlUrl);
-                    payload.put("defaultBranch", defaultBranch);
-                    payload.put("stars", item.get("stargazers_count"));
-                    payload.put("forks", item.get("forks_count"));
-                    payload.put("language", item.get("language"));
-                    payload.put("topics", item.get("topics"));
-                    payload.put("query", query);
-                    payload.put("description", description);
-                    discovered += persistRaw(SourceType.GITHUB, fullName, htmlUrl, htmlUrl, title, author,
-                            publishedAt, updatedAt, content.toString(), payload);
-                    remaining--;
+                StringBuilder content = new StringBuilder();
+                content.append(StringUtils.defaultString(snapshot.description));
+                if (StringUtils.isNotBlank(snapshot.readme) && enriched < Math.max(1, githubReadmeLimit)) {
+                    content.append("\nREADME: ").append(ExternalSourceUtils.truncate(snapshot.readme, 8000));
+                    enriched++;
                 }
-            } catch (Exception e) {
-                log.warn("ExternalSourceFacade discoverGitHub query error, query:{}", query, e);
+                if (StringUtils.isNotBlank(githubToken)) {
+                    for (String snippet : fetchGitHubFileSnippets(snapshot.fullName)) {
+                        content.append("\nFILE: ").append(ExternalSourceUtils.truncate(snippet, 2500));
+                    }
+                }
+                Map<String, Object> payload = new LinkedHashMap<String, Object>();
+                payload.put("sourceType", SourceType.GITHUB.name());
+                payload.put("siteName", SourceType.GITHUB.siteName());
+                payload.put("fullName", snapshot.fullName);
+                payload.put("htmlUrl", snapshot.htmlUrl);
+                payload.put("defaultBranch", snapshot.defaultBranch);
+                payload.put("stars", snapshot.stars);
+                payload.put("forks", snapshot.forks);
+                payload.put("language", snapshot.language);
+                payload.put("topics", snapshot.topics);
+                payload.put("query", query);
+                payload.put("description", snapshot.description);
+                payload.put("fallbackMode", snapshot.fallbackMode);
+                discovered += persistRaw(SourceType.GITHUB, snapshot.fullName, snapshot.htmlUrl, snapshot.htmlUrl,
+                        snapshot.fullName, snapshot.author, snapshot.publishedAt, snapshot.updatedAt, content.toString(), payload);
+                remaining--;
+            }
+            if (usedHtmlFallback && StringUtils.isBlank(githubToken)) {
+                sleepQuietly(githubHtmlQuerySleepMs);
             }
         }
         log.info("ExternalSourceFacade discoverGitHub done, discovered:{}", discovered);
@@ -248,12 +260,28 @@ public class ExternalSourceFacade {
                     externalSourceDao.markRawStatus(raw.id, "IGNORED", "{\"reason\":\"normalize_empty\"}");
                     continue;
                 }
-                if (externalSourceDao.existsNormFingerprint(norm.scene, norm.strategyName, norm.fingerprint)) {
-                    norm.status = "DUPLICATE";
-                } else {
-                    norm.status = "READY";
+                boolean duplicateNorm = externalSourceDao.existsNormFingerprint(norm.scene, norm.strategyName, norm.fingerprint)
+                        || externalSourceDao.existsNormByCanonicalUrl(norm.sourceType, norm.canonicalUrl);
+                if (duplicateNorm) {
+                    Map<String, Object> payload = new LinkedHashMap<String, Object>();
+                    payload.put("reason", "duplicate_existing_norm");
+                    payload.put("scene", norm.scene);
+                    payload.put("strategyName", norm.strategyName);
+                    payload.put("canonicalUrl", norm.canonicalUrl);
+                    externalSourceDao.markRawStatus(raw.id, "IGNORED", JsonUtils.Serializer(payload));
+                    continue;
                 }
-                externalSourceDao.insertNorm(norm);
+                norm.status = "READY";
+                boolean inserted = externalSourceDao.insertNormIfAbsent(norm);
+                if (!inserted) {
+                    Map<String, Object> payload = new LinkedHashMap<String, Object>();
+                    payload.put("reason", "duplicate_existing_norm");
+                    payload.put("scene", norm.scene);
+                    payload.put("strategyName", norm.strategyName);
+                    payload.put("canonicalUrl", norm.canonicalUrl);
+                    externalSourceDao.markRawStatus(raw.id, "IGNORED", JsonUtils.Serializer(payload));
+                    continue;
+                }
                 Map<String, Object> payload = new LinkedHashMap<String, Object>();
                 payload.put("normId", norm.id);
                 payload.put("normStatus", norm.status);
@@ -320,9 +348,18 @@ public class ExternalSourceFacade {
         List<CountRow> sceneCounts = externalSourceDao.countLatestNormBySceneSince(since);
         List<NormRecord> readySamples = externalSourceDao.loadLatestNormSamples("READY", 20);
 
+        Map<String, Long> rawStatusTotals = aggregateByStatus(rawCounts);
+        Map<String, Long> normStatusTotals = aggregateByStatus(normCounts);
         Map<String, Object> summary = new LinkedHashMap<String, Object>();
         summary.put("generatedAt", ExternalSourceUtils.nowText());
         summary.put("since", since);
+        summary.put("rawTotal", sumTotals(rawCounts));
+        summary.put("normTotal", sumTotals(normCounts));
+        summary.put("rawStatusTotals", rawStatusTotals);
+        summary.put("normStatusTotals", normStatusTotals);
+        summary.put("readyTotal", normStatusTotals.getOrDefault("READY", 0L));
+        summary.put("duplicateTotal", normStatusTotals.getOrDefault("DUPLICATE", 0L));
+        summary.put("errorTotal", rawStatusTotals.getOrDefault("ERROR", 0L) + normStatusTotals.getOrDefault("ERROR", 0L));
         summary.put("rawCounts", rawCounts);
         summary.put("normCounts", normCounts);
         summary.put("sceneCounts", sceneCounts);
@@ -335,7 +372,7 @@ public class ExternalSourceFacade {
             Path jsonPath = reportDir.resolve("external-source-digest-" + day + ".json");
             Path mdPath = reportDir.resolve("external-source-digest-" + day + ".md");
             Files.write(jsonPath, JsonUtils.Serializer(summary).getBytes(StandardCharsets.UTF_8));
-            Files.write(mdPath, buildDigestMarkdown(summary, rawCounts, normCounts, sceneCounts, readySamples).getBytes(StandardCharsets.UTF_8));
+            Files.write(mdPath, buildDigestMarkdownV2(summary, rawCounts, normCounts, sceneCounts, readySamples).getBytes(StandardCharsets.UTF_8));
             log.info("ExternalSourceFacade writeDigestReport done, json:{}, markdown:{}", jsonPath, mdPath);
             return mdPath.toString();
         } catch (Exception e) {
@@ -352,23 +389,78 @@ public class ExternalSourceFacade {
         StringBuilder sb = new StringBuilder();
         sb.append("# 外部策略采集日报\n\n");
         sb.append("- 生成时间: ").append(summary.get("generatedAt")).append("\n");
-        sb.append("- 统计起点: ").append(summary.get("since")).append("\n\n");
+        sb.append("- 统计起点: ").append(summary.get("since")).append("\n");
+        sb.append("- Raw 总数: ").append(summary.get("rawTotal")).append("\n");
+        sb.append("- Norm 总数: ").append(summary.get("normTotal")).append("\n");
+        sb.append("- READY 数量: ").append(summary.get("readyTotal")).append("\n");
+        sb.append("- DUPLICATE 数量: ").append(summary.get("duplicateTotal")).append("\n");
+        sb.append("- ERROR 数量: ").append(summary.get("errorTotal")).append("\n\n");
+
         sb.append("## Raw 统计\n\n");
         for (CountRow row : rawCounts) {
             sb.append("- ").append(row.key1).append(" / ").append(row.key2).append(": ").append(row.total).append("\n");
         }
+
         sb.append("\n## Norm 统计\n\n");
         for (CountRow row : normCounts) {
             sb.append("- ").append(row.key1).append(" / ").append(row.key2).append(": ").append(row.total).append("\n");
         }
+
         sb.append("\n## Scene 分布\n\n");
         for (CountRow row : sceneCounts) {
             sb.append("- ").append(row.key1).append(": ").append(row.total).append("\n");
         }
+
         sb.append("\n## READY 样本\n\n");
-        for (NormRecord row : readySamples) {
-            sb.append("- ").append(row.siteName).append(" | ").append(row.strategyName).append(" | ")
-                    .append(row.scene).append(" | ").append(row.normalizedTitle).append("\n");
+        if (readySamples == null || readySamples.isEmpty()) {
+            sb.append("- 暂无 READY 样本\n");
+        } else {
+            for (NormRecord row : readySamples) {
+                sb.append("- ").append(row.siteName).append(" | ").append(row.strategyName).append(" | ")
+                        .append(row.scene).append(" | ").append(row.normalizedTitle).append("\n");
+            }
+        }
+        return sb.toString();
+    }
+
+    private String buildDigestMarkdownV2(Map<String, Object> summary,
+                                         List<CountRow> rawCounts,
+                                         List<CountRow> normCounts,
+                                         List<CountRow> sceneCounts,
+                                         List<NormRecord> readySamples) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("# 外部策略采集日报\n\n");
+        sb.append("- 生成时间: ").append(summary.get("generatedAt")).append("\n");
+        sb.append("- 统计起点: ").append(summary.get("since")).append("\n");
+        sb.append("- Raw 总数: ").append(summary.get("rawTotal")).append("\n");
+        sb.append("- Norm 总数: ").append(summary.get("normTotal")).append("\n");
+        sb.append("- READY 数量: ").append(summary.get("readyTotal")).append("\n");
+        sb.append("- DUPLICATE 数量: ").append(summary.get("duplicateTotal")).append("\n");
+        sb.append("- ERROR 数量: ").append(summary.get("errorTotal")).append("\n\n");
+
+        sb.append("## Raw 统计\n\n");
+        for (CountRow row : rawCounts) {
+            sb.append("- ").append(row.key1).append(" / ").append(row.key2).append(": ").append(row.total).append("\n");
+        }
+
+        sb.append("\n## Norm 统计\n\n");
+        for (CountRow row : normCounts) {
+            sb.append("- ").append(row.key1).append(" / ").append(row.key2).append(": ").append(row.total).append("\n");
+        }
+
+        sb.append("\n## Scene 分布\n\n");
+        for (CountRow row : sceneCounts) {
+            sb.append("- ").append(row.key1).append(": ").append(row.total).append("\n");
+        }
+
+        sb.append("\n## READY 样本\n\n");
+        if (readySamples == null || readySamples.isEmpty()) {
+            sb.append("- 暂无 READY 样本\n");
+        } else {
+            for (NormRecord row : readySamples) {
+                sb.append("- ").append(row.siteName).append(" | ").append(row.strategyName).append(" | ")
+                        .append(row.scene).append(" | ").append(row.normalizedTitle).append("\n");
+            }
         }
         return sb.toString();
     }
@@ -418,6 +510,7 @@ public class ExternalSourceFacade {
     private int captureTradingViewDetail(String url) {
         try {
             Document doc = httpSupport.getDocument(url);
+            String rawHtml = doc.outerHtml();
             String title = firstNonBlank(
                     attr(doc, "meta[property=og:title]", "content"),
                     attr(doc, "meta[name=twitter:title]", "content"),
@@ -427,8 +520,17 @@ public class ExternalSourceFacade {
                     attr(doc, "meta[name=description]", "content"),
                     text(doc.selectFirst("main")),
                     text(doc.body()));
-            String author = text(doc.selectFirst("a[href^=/u/]"));
-            String publishedTime = attr(doc, "time[datetime]", "datetime");
+            String author = firstNonBlank(
+                    text(doc.selectFirst("a[href^=/u/]")),
+                    extractFirstRegex(rawHtml, "\"username\":\"([^\"]+)\""));
+            String publishedTime = firstNonBlank(
+                    extractFirstRegex(rawHtml, "\"datePublished\":\"([^\"]+)\""),
+                    attr(doc, "time[datetime]", "datetime"),
+                    extractFirstRegex(rawHtml, TRADINGVIEW_ENGLISH_TIME_PATTERN));
+            String updateTime = firstNonBlank(
+                    extractFirstRegex(rawHtml, "\"dateModified\":\"([^\"]+)\""),
+                    extractFirstRegex(rawHtml, "Updated on (" + TRADINGVIEW_ENGLISH_TIME_PATTERN.pattern() + ")"),
+                    publishedTime);
             String canonicalUrl = firstNonBlank(attr(doc, "link[rel=canonical]", "href"), url);
             if (StringUtils.isBlank(title) || StringUtils.isBlank(content)) {
                 return 0;
@@ -440,8 +542,9 @@ public class ExternalSourceFacade {
             payload.put("title", title);
             payload.put("author", author);
             payload.put("publishedTime", normalizeIsoDateTime(publishedTime));
+            payload.put("updateTime", normalizeIsoDateTime(updateTime));
             return persistRaw(SourceType.TRADINGVIEW, extractExternalId(canonicalUrl, "/script/"), canonicalUrl, url, title,
-                    author, normalizeIsoDateTime(publishedTime), normalizeIsoDateTime(publishedTime), content, payload);
+                    author, normalizeIsoDateTime(publishedTime), normalizeIsoDateTime(updateTime), content, payload);
         } catch (Exception e) {
             log.warn("captureTradingViewDetail error, url:{}", url, e);
             return 0;
@@ -451,18 +554,33 @@ public class ExternalSourceFacade {
     private int captureFmzDetail(String url) {
         try {
             Document doc = httpSupport.getDocument(url);
+            String jsonLd = selectJsonLd(doc);
             String title = firstNonBlank(
+                    extractJsonLdField(jsonLd, "headline"),
                     attr(doc, "meta[property=og:title]", "content"),
-                    attr(doc, "meta[name=description]", "content"),
                     text(doc.selectFirst("h1")),
                     doc.title());
             String content = firstNonBlank(
+                    extractJsonLdField(jsonLd, "text"),
                     attr(doc, "meta[property=og:description]", "content"),
                     text(doc.selectFirst("main")),
                     text(doc.body()));
-            String author = firstNonBlank(text(doc.selectFirst("a[href*=/user/]")), text(doc.selectFirst(".author")));
-            String publishedTime = attr(doc, "time[datetime]", "datetime");
-            String canonicalUrl = firstNonBlank(attr(doc, "link[rel=canonical]", "href"), url);
+            String author = firstNonBlank(
+                    extractJsonLdAuthorName(jsonLd),
+                    text(doc.selectFirst("a[href*=/user/]")),
+                    text(doc.selectFirst(".author")));
+            String publishedTime = firstNonBlank(
+                    extractJsonLdField(jsonLd, "datePublished"),
+                    extractFirstRegex(doc.text(), "创建日期[:：]\\s*([0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2})"),
+                    attr(doc, "time[datetime]", "datetime"));
+            String updateTime = firstNonBlank(
+                    extractJsonLdField(jsonLd, "dateModified"),
+                    extractFirstRegex(doc.text(), "最后修改[:：]\\s*([0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2})"),
+                    publishedTime);
+            String canonicalUrl = firstNonBlank(
+                    extractJsonLdField(jsonLd, "url"),
+                    attr(doc, "link[rel=canonical]", "href"),
+                    url);
             if (StringUtils.isBlank(title) || StringUtils.isBlank(content)) {
                 return 0;
             }
@@ -473,12 +591,73 @@ public class ExternalSourceFacade {
             payload.put("title", title);
             payload.put("author", author);
             payload.put("publishedTime", normalizeIsoDateTime(publishedTime));
+            payload.put("updateTime", normalizeIsoDateTime(updateTime));
             return persistRaw(SourceType.FMZ, extractExternalId(canonicalUrl, "/strategy/"), canonicalUrl, url, title,
-                    author, normalizeIsoDateTime(publishedTime), normalizeIsoDateTime(publishedTime), content, payload);
+                    author, normalizeIsoDateTime(publishedTime), normalizeIsoDateTime(updateTime), content, payload);
         } catch (Exception e) {
             log.warn("captureFmzDetail error, url:{}", url, e);
             return 0;
         }
+    }
+
+    private int captureFmzDetailV2(String url) {
+        try {
+            Document doc = httpSupport.getDocument(url);
+            String jsonLd = selectJsonLd(doc);
+            String title = firstNonBlank(
+                    extractJsonLdField(jsonLd, "headline"),
+                    attr(doc, "meta[property=og:title]", "content"),
+                    text(doc.selectFirst("h1")),
+                    doc.title());
+            String content = firstNonBlank(
+                    extractJsonLdField(jsonLd, "text"),
+                    attr(doc, "meta[property=og:description]", "content"),
+                    text(doc.selectFirst("main")),
+                    text(doc.body()));
+            String author = firstNonBlank(
+                    extractJsonLdAuthorName(jsonLd),
+                    text(doc.selectFirst("a[href*=/user/]")),
+                    text(doc.selectFirst(".author")));
+            String publishedTime = firstNonBlank(
+                    extractJsonLdField(jsonLd, "datePublished"),
+                    extractFirstRegex(doc.text(), "创建日期[:：]\\s*([0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2})"),
+                    attr(doc, "time[datetime]", "datetime"));
+            String updateTime = firstNonBlank(
+                    extractJsonLdField(jsonLd, "dateModified"),
+                    extractFirstRegex(doc.text(), "最后修改[:：]\\s*([0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2})"),
+                    publishedTime);
+            String canonicalUrl = preferDetailCanonicalUrl(
+                    extractJsonLdField(jsonLd, "url"),
+                    attr(doc, "link[rel=canonical]", "href"),
+                    url,
+                    "/strategy/");
+            if (StringUtils.isBlank(title) || StringUtils.isBlank(content)) {
+                return 0;
+            }
+            Map<String, Object> payload = new LinkedHashMap<String, Object>();
+            payload.put("sourceType", SourceType.FMZ.name());
+            payload.put("siteName", SourceType.FMZ.siteName());
+            payload.put("canonicalUrl", canonicalUrl);
+            payload.put("title", title);
+            payload.put("author", author);
+            payload.put("publishedTime", normalizeIsoDateTime(publishedTime));
+            payload.put("updateTime", normalizeIsoDateTime(updateTime));
+            return persistRaw(SourceType.FMZ, extractExternalId(canonicalUrl, "/strategy/"), canonicalUrl, url, title,
+                    author, normalizeIsoDateTime(publishedTime), normalizeIsoDateTime(updateTime), content, payload);
+        } catch (Exception e) {
+            log.warn("captureFmzDetailV2 error, url:{}", url, e);
+            return 0;
+        }
+    }
+
+    private String preferDetailCanonicalUrl(String primary, String secondary, String fallback, String token) {
+        if (StringUtils.contains(primary, token)) {
+            return ExternalSourceUtils.safe(primary);
+        }
+        if (StringUtils.contains(secondary, token)) {
+            return ExternalSourceUtils.safe(secondary);
+        }
+        return ExternalSourceUtils.safe(fallback);
     }
 
     private int persistRaw(SourceType sourceType,
@@ -491,8 +670,14 @@ public class ExternalSourceFacade {
                            String updateTime,
                            String content,
                            Map<String, Object> payload) {
+        String finalExternalId = StringUtils.defaultIfBlank(externalId, ExternalSourceUtils.sha256(canonicalUrl));
         String contentHash = ExternalSourceUtils.sha256(title + "\n" + content);
-        boolean duplicate = externalSourceDao.existsSameRawContent(sourceType.name(), externalId, contentHash);
+        if (externalSourceDao.existsRawByExternalId(sourceType.name(), finalExternalId)
+                || externalSourceDao.existsRawByCanonicalUrl(sourceType.name(), canonicalUrl)
+                || externalSourceDao.existsSameRawContent(sourceType.name(), finalExternalId, contentHash)) {
+            log.info("persistRaw skip duplicate, sourceType:{}, externalId:{}, canonicalUrl:{}", sourceType.name(), finalExternalId, canonicalUrl);
+            return 0;
+        }
         RawRecord row = new RawRecord();
         row.id = "raw_" + ExternalSourceUtils.slug(sourceType.name().toLowerCase(Locale.ROOT), "src")
                 + "_" + System.currentTimeMillis()
@@ -500,7 +685,7 @@ public class ExternalSourceFacade {
         row.sourceType = sourceType.name();
         row.siteName = sourceType.siteName();
         row.sourceName = sourceType.siteName();
-        row.externalId = StringUtils.defaultIfBlank(externalId, ExternalSourceUtils.sha256(canonicalUrl));
+        row.externalId = finalExternalId;
         row.canonicalUrl = canonicalUrl;
         row.sourceUrl = sourceUrl;
         row.title = ExternalSourceUtils.truncate(title, 512);
@@ -509,24 +694,50 @@ public class ExternalSourceFacade {
         row.externalUpdateTime = updateTime;
         row.contentHash = contentHash;
         row.content = ExternalSourceUtils.truncate(content, 16000);
-        row.status = duplicate ? "DUPLICATE" : "NEW";
+        row.status = "NEW";
         row.createTime = ExternalSourceUtils.nowText();
         row.payload = JsonUtils.Serializer(payload == null ? Collections.emptyMap() : payload);
-        externalSourceDao.insertRaw(row);
-        return duplicate ? 0 : 1;
+        boolean inserted = externalSourceDao.insertRawIfAbsent(row);
+        if (!inserted) {
+            log.info("persistRaw skip duplicate by insert guard, sourceType:{}, externalId:{}, canonicalUrl:{}",
+                    sourceType.name(), finalExternalId, canonicalUrl);
+            return 0;
+        }
+        return 1;
     }
 
     private String fetchGitHubReadme(String fullName) {
+        if (StringUtils.isNotBlank(githubToken)) {
+            try {
+                String url = "https://api.github.com/repos/" + fullName + "/readme";
+                String text = httpSupport.getText(url, githubHeaders("application/vnd.github.raw+json"));
+                if (StringUtils.isNotBlank(text)) {
+                    return text;
+                }
+            } catch (Exception e) {
+                log.debug("fetchGitHubReadme api fallback, fullName:{}", fullName, e);
+            }
+        }
+        return fetchGitHubReadmeFromHtml(fullName, null);
+    }
+
+    private String fetchGitHubReadmeFromHtml(String fullName, Document repoDoc) {
         try {
-            String url = "https://api.github.com/repos/" + fullName + "/readme";
-            return httpSupport.getText(url, githubHeaders("application/vnd.github.raw+json"));
+            Document doc = repoDoc == null ? httpSupport.getDocument("https://github.com/" + fullName) : repoDoc;
+            return firstNonBlank(
+                    text(doc.selectFirst("article.markdown-body")),
+                    text(doc.selectFirst("#readme")),
+                    text(doc.selectFirst("[data-testid=readme]")));
         } catch (Exception e) {
-            log.debug("fetchGitHubReadme skip, fullName:{}", fullName, e);
+            log.debug("fetchGitHubReadmeFromHtml skip, fullName:{}", fullName, e);
             return "";
         }
     }
 
     private List<String> fetchGitHubFileSnippets(String fullName) {
+        if (StringUtils.isBlank(githubToken)) {
+            return Collections.emptyList();
+        }
         try {
             String url = "https://api.github.com/repos/" + fullName + "/contents";
             List<Map<String, Object>> items = httpSupport.getJsonList(url, githubHeaders("application/vnd.github+json"));
@@ -553,6 +764,112 @@ public class ExternalSourceFacade {
         } catch (Exception e) {
             log.debug("fetchGitHubFileSnippets skip, fullName:{}", fullName, e);
             return Collections.emptyList();
+        }
+    }
+
+    private List<GitHubRepoSnapshot> discoverGitHubByApi(String query, int limit) {
+        if (StringUtils.isBlank(githubToken)) {
+            return Collections.emptyList();
+        }
+        String q = query
+                + " archived:false fork:false stars:>=" + Math.max(0, githubMinStars)
+                + " pushed:>=" + LocalDate.now().minusDays(Math.max(1, githubQueryWindowDays));
+        String url = "https://api.github.com/search/repositories?q="
+                + encodeUtf8(q)
+                + "&sort=updated&order=desc&per_page=" + Math.max(1, limit) + "&page=1";
+        try {
+            Map<String, Object> response = httpSupport.getJsonObject(url, githubHeaders("application/vnd.github+json"));
+            Object itemsObj = response.get("items");
+            if (!(itemsObj instanceof List)) {
+                return Collections.emptyList();
+            }
+            @SuppressWarnings("unchecked")
+            List<Map<String, Object>> items = (List<Map<String, Object>>) itemsObj;
+            List<GitHubRepoSnapshot> snapshots = new ArrayList<GitHubRepoSnapshot>();
+            for (Map<String, Object> item : items) {
+                GitHubRepoSnapshot snapshot = new GitHubRepoSnapshot();
+                snapshot.fullName = text(item.get("full_name"));
+                snapshot.htmlUrl = text(item.get("html_url"));
+                snapshot.author = text(item.get("owner") instanceof Map ? ((Map<?, ?>) item.get("owner")).get("login") : "");
+                snapshot.description = text(item.get("description"));
+                snapshot.updatedAt = normalizeIsoDateTime(text(item.get("updated_at")));
+                snapshot.publishedAt = normalizeIsoDateTime(text(item.get("created_at")));
+                snapshot.defaultBranch = text(item.get("default_branch"));
+                snapshot.stars = text(item.get("stargazers_count"));
+                snapshot.forks = text(item.get("forks_count"));
+                snapshot.language = text(item.get("language"));
+                snapshot.topics = item.get("topics");
+                snapshot.readme = fetchGitHubReadme(snapshot.fullName);
+                snapshot.fallbackMode = "api";
+                if (StringUtils.isNotBlank(snapshot.fullName) && StringUtils.isNotBlank(snapshot.htmlUrl)) {
+                    snapshots.add(snapshot);
+                }
+            }
+            return snapshots;
+        } catch (Exception e) {
+            log.warn("discoverGitHubByApi error, query:{}", query, e);
+            return Collections.emptyList();
+        }
+    }
+
+    private List<GitHubRepoSnapshot> discoverGitHubByHtml(String query, int limit) {
+        try {
+            String url = "https://github.com/search?q=" + encodeUtf8(query) + "&type=repositories";
+            Document doc = httpSupport.getDocument(url);
+            Set<String> repoNames = new LinkedHashSet<String>();
+            for (Element link : doc.select("a[href]")) {
+                String href = ExternalSourceUtils.safe(link.attr("href"));
+                if (!isGitHubRepoPath(href)) {
+                    continue;
+                }
+                repoNames.add(href.substring(1));
+                if (repoNames.size() >= Math.max(1, limit)) {
+                    break;
+                }
+            }
+            List<GitHubRepoSnapshot> result = new ArrayList<GitHubRepoSnapshot>();
+            for (String fullName : repoNames) {
+                GitHubRepoSnapshot snapshot = fetchGitHubRepoSnapshotFromHtml(fullName);
+                if (snapshot != null) {
+                    result.add(snapshot);
+                }
+            }
+            log.info("discoverGitHubByHtml fallback used, query:{}, repoCount:{}", query, result.size());
+            return result;
+        } catch (Exception e) {
+            log.warn("discoverGitHubByHtml error, query:{}", query, e);
+            return Collections.emptyList();
+        }
+    }
+
+    private GitHubRepoSnapshot fetchGitHubRepoSnapshotFromHtml(String fullName) {
+        try {
+            String htmlUrl = "https://github.com/" + fullName;
+            Document doc = httpSupport.getDocument(htmlUrl);
+            GitHubRepoSnapshot snapshot = new GitHubRepoSnapshot();
+            snapshot.fullName = fullName;
+            snapshot.htmlUrl = htmlUrl;
+            snapshot.author = fullName.contains("/") ? fullName.substring(0, fullName.indexOf('/')) : "";
+            snapshot.description = firstNonBlank(
+                    attr(doc, "meta[property=og:description]", "content"),
+                    attr(doc, "meta[name=description]", "content"),
+                    text(doc.selectFirst("p.f4")),
+                    text(doc.selectFirst("p[data-pjax=\"#repo-content-pjax-container\"]")));
+            snapshot.updatedAt = normalizeIsoDateTime(firstNonBlank(
+                    attr(doc, "relative-time[datetime]", "datetime"),
+                    extractFirstRegex(doc.outerHtml(), "datetime=\"([0-9]{4}-[0-9]{2}-[0-9]{2}T[^\\\"]+)\"")));
+            snapshot.publishedAt = "";
+            snapshot.defaultBranch = "";
+            snapshot.stars = "";
+            snapshot.forks = "";
+            snapshot.language = "";
+            snapshot.topics = Collections.emptyList();
+            snapshot.readme = fetchGitHubReadmeFromHtml(fullName, doc);
+            snapshot.fallbackMode = "html";
+            return snapshot;
+        } catch (Exception e) {
+            log.warn("fetchGitHubRepoSnapshotFromHtml error, fullName:{}", fullName, e);
+            return null;
         }
     }
 
@@ -603,6 +920,29 @@ public class ExternalSourceFacade {
         return result;
     }
 
+    private Set<String> loadFmzStrategyUrls(int targetCount) {
+        Set<String> detailUrls = new LinkedHashSet<String>();
+        try {
+            String sitemapIndex = httpSupport.getText("https://www.fmz.com/sitemap.xml", Collections.<String, String>emptyMap());
+            List<String> sitemapUrls = collectMatches(sitemapIndex, FMZ_SITEMAP_PATTERN);
+            for (String sitemapUrl : sitemapUrls) {
+                if (detailUrls.size() >= targetCount) {
+                    break;
+                }
+                String xml = httpSupport.getText(sitemapUrl, Collections.<String, String>emptyMap());
+                for (String strategyUrl : collectMatches(xml, FMZ_STRATEGY_PATTERN)) {
+                    detailUrls.add(strategyUrl);
+                    if (detailUrls.size() >= targetCount) {
+                        break;
+                    }
+                }
+            }
+        } catch (Exception e) {
+            log.warn("loadFmzStrategyUrls error", e);
+        }
+        return detailUrls;
+    }
+
     private Document loadFirstDocument(String[] urls) {
         for (String url : urls) {
             try {
@@ -635,28 +975,52 @@ public class ExternalSourceFacade {
         if (StringUtils.isBlank(value)) {
             return "";
         }
-        List<DateTimeFormatter> formatters = Arrays.asList(
+        value = value.replace("Published on ", "")
+                .replace("Updated on ", "")
+                .replace("Published ", "")
+                .replace("Updated ", "")
+                .trim();
+        List<DateTimeFormatter> zoned = Arrays.asList(
                 DateTimeFormatter.ISO_OFFSET_DATE_TIME,
                 DateTimeFormatter.ISO_ZONED_DATE_TIME,
-                DateTimeFormatter.RFC_1123_DATE_TIME,
-                DateTimeFormatter.ofPattern("EEE, dd MMM yyyy HH:mm:ss z", Locale.ENGLISH),
-                DateTimeFormatter.ofPattern("EEE, dd MMM yyyy HH:mm z", Locale.ENGLISH),
-                DateTimeFormatter.ofPattern("EEE, dd MMM yyyy HH:mm:ss", Locale.ENGLISH),
-                DateTimeFormatter.ofPattern("EEE, dd MMM yyyy HH:mm", Locale.ENGLISH),
-                DateTimeFormatter.ofPattern("EEE, dd MMM yyyy HH", Locale.ENGLISH),
-                DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"),
-                DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm"),
-                DateTimeFormatter.ofPattern("yyyy-MM-dd HH")
+                DateTimeFormatter.RFC_1123_DATE_TIME
         );
-        for (DateTimeFormatter formatter : formatters) {
+        for (DateTimeFormatter formatter : zoned) {
             try {
                 if (formatter == DateTimeFormatter.ISO_OFFSET_DATE_TIME) {
                     return OffsetDateTime.parse(value, formatter).toLocalDateTime().format(TS);
                 }
-                if (formatter == DateTimeFormatter.ISO_ZONED_DATE_TIME || formatter == DateTimeFormatter.RFC_1123_DATE_TIME) {
-                    return ZonedDateTime.parse(value, formatter).toLocalDateTime().format(TS);
-                }
+                return ZonedDateTime.parse(value, formatter).toLocalDateTime().format(TS);
+            } catch (Exception ignore) {
+            }
+        }
+        List<DateTimeFormatter> localDateTimeFormats = Arrays.asList(
+                DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"),
+                DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm"),
+                DateTimeFormatter.ofPattern("yyyy-MM-dd HH"),
+                DateTimeFormatter.ofPattern("MMM d, yyyy, HH:mm 'UTC'", Locale.ENGLISH),
+                DateTimeFormatter.ofPattern("MMM d, yyyy, HH:mm:ss 'UTC'", Locale.ENGLISH),
+                DateTimeFormatter.ofPattern("MMMM d, yyyy, HH:mm 'UTC'", Locale.ENGLISH),
+                DateTimeFormatter.ofPattern("MMMM d, yyyy, HH:mm:ss 'UTC'", Locale.ENGLISH),
+                DateTimeFormatter.ofPattern("MMM d, yyyy, h:mm a", Locale.ENGLISH),
+                DateTimeFormatter.ofPattern("MMM d, yyyy, hh:mm a", Locale.ENGLISH),
+                DateTimeFormatter.ofPattern("MMMM d, yyyy, h:mm a", Locale.ENGLISH),
+                DateTimeFormatter.ofPattern("MMMM d, yyyy, hh:mm a", Locale.ENGLISH)
+        );
+        for (DateTimeFormatter formatter : localDateTimeFormats) {
+            try {
                 return LocalDateTime.parse(value, formatter).format(TS);
+            } catch (Exception ignore) {
+            }
+        }
+        List<DateTimeFormatter> localDateFormats = Arrays.asList(
+                DateTimeFormatter.ofPattern("yyyy-MM-dd"),
+                DateTimeFormatter.ofPattern("MMM d, yyyy", Locale.ENGLISH),
+                DateTimeFormatter.ofPattern("MMMM d, yyyy", Locale.ENGLISH)
+        );
+        for (DateTimeFormatter formatter : localDateFormats) {
+            try {
+                return LocalDate.parse(value, formatter).atStartOfDay().format(TS);
             } catch (Exception ignore) {
             }
         }
@@ -709,5 +1073,132 @@ public class ExternalSourceFacade {
         } catch (Exception e) {
             return 0;
         }
+    }
+
+    private Map<String, Long> aggregateByStatus(List<CountRow> rows) {
+        Map<String, Long> totals = new LinkedHashMap<String, Long>();
+        if (rows == null) {
+            return totals;
+        }
+        for (CountRow row : rows) {
+            String key = ExternalSourceUtils.safe(row.key2);
+            if (StringUtils.isBlank(key)) {
+                key = "UNKNOWN";
+            }
+            totals.put(key, totals.getOrDefault(key, 0L) + (row.total == null ? 0L : row.total));
+        }
+        return totals;
+    }
+
+    private long sumTotals(List<CountRow> rows) {
+        long total = 0L;
+        if (rows == null) {
+            return total;
+        }
+        for (CountRow row : rows) {
+            total += row.total == null ? 0L : row.total;
+        }
+        return total;
+    }
+
+    private void sleepQuietly(long millis) {
+        if (millis <= 0L) {
+            return;
+        }
+        try {
+            Thread.sleep(millis);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+    }
+
+    private List<String> collectMatches(String text, Pattern pattern) {
+        List<String> result = new ArrayList<String>();
+        if (StringUtils.isBlank(text) || pattern == null) {
+            return result;
+        }
+        Matcher matcher = pattern.matcher(text);
+        while (matcher.find()) {
+            result.add(matcher.group());
+        }
+        return result;
+    }
+
+    private String extractFirstRegex(String text, String regex) {
+        if (StringUtils.isBlank(text) || StringUtils.isBlank(regex)) {
+            return "";
+        }
+        Matcher matcher = Pattern.compile(regex, Pattern.CASE_INSENSITIVE | Pattern.DOTALL).matcher(text);
+        if (!matcher.find()) {
+            return "";
+        }
+        if (matcher.groupCount() >= 1) {
+            return ExternalSourceUtils.safe(matcher.group(1));
+        }
+        return ExternalSourceUtils.safe(matcher.group());
+    }
+
+    private String extractFirstRegex(String text, Pattern pattern) {
+        if (StringUtils.isBlank(text) || pattern == null) {
+            return "";
+        }
+        Matcher matcher = pattern.matcher(text);
+        if (!matcher.find()) {
+            return "";
+        }
+        if (matcher.groupCount() >= 1) {
+            return ExternalSourceUtils.safe(matcher.group(1));
+        }
+        return ExternalSourceUtils.safe(matcher.group());
+    }
+
+    private String selectJsonLd(Document doc) {
+        if (doc == null) {
+            return "";
+        }
+        for (Element script : doc.select("script[type=application/ld+json]")) {
+            String json = firstNonBlank(script.data(), script.html());
+            if (StringUtils.containsIgnoreCase(json, "\"headline\"") || StringUtils.containsIgnoreCase(json, "\"@type\":\"Article\"")) {
+                return json;
+            }
+        }
+        return "";
+    }
+
+    private String extractJsonLdField(String json, String field) {
+        return extractFirstRegex(json, "\"" + Pattern.quote(field) + "\"\\s*:\\s*\"([^\"]+)\"");
+    }
+
+    private String extractJsonLdAuthorName(String json) {
+        return extractFirstRegex(json, "\"author\"\\s*:\\s*\\{[^\\}]*?\"name\"\\s*:\\s*\"([^\"]+)\"");
+    }
+
+    private boolean isGitHubRepoPath(String href) {
+        if (StringUtils.isBlank(href) || !GITHUB_HTML_REPO_PATH_PATTERN.matcher(href).matches()) {
+            return false;
+        }
+        String trimmed = href.substring(1);
+        int slash = trimmed.indexOf('/');
+        if (slash <= 0) {
+            return false;
+        }
+        String owner = trimmed.substring(0, slash).toLowerCase(Locale.ROOT);
+        return !GITHUB_NON_REPO_ROOTS.contains(owner);
+    }
+
+    private static final class GitHubRepoSnapshot {
+        private String fullName;
+        private String htmlUrl;
+        private String author;
+        private String description;
+        private String publishedAt;
+        private String updatedAt;
+        private String defaultBranch;
+        private String stars;
+        private String forks;
+        private String language;
+        private Object topics;
+        private String readme;
+        private String fallbackMode;
     }
 }

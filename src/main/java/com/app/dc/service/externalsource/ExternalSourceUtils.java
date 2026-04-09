@@ -112,7 +112,7 @@ public final class ExternalSourceUtils {
     }
 
     public static String buildChineseDescription(String siteName, String title, String scene, String content) {
-        return String.format("%s公开策略来源《%s》，推测适用于%s场景，核心逻辑包含%s，建议先走回测验证后再决定是否进入候选策略链。",
+        return String.format("%s 公开策略来源《%s》，推测适用于 %s 场景，核心逻辑包含 %s，建议先走回测验证后再决定是否进入候选策略链。",
                 safe(siteName), safe(title), safe(scene), summarizeLogic(content));
     }
 }

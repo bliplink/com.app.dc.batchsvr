@@ -21,7 +21,9 @@ import com.app.dc.service.job.ExternalSourceDispatchJob;
 import com.app.dc.service.job.ExternalSourceNormalizeJob;
 import com.app.dc.service.job.FmzDiscoverJob;
 import com.app.dc.service.job.GitHubDiscoverJob;
+import com.app.dc.service.job.StrategySystemDailyReportJob;
 import com.app.dc.service.job.TradingViewDiscoverJob;
+import com.app.dc.service.systemreport.StrategySystemDailyReportService;
 import com.app.dc.util.Consts;
 import com.app.dc.utils.TradeSvrClient;
 
@@ -55,6 +57,9 @@ public class BatchStart implements CommandLineRunner {
 
 	@Autowired
 	private ExternalSourceFacade externalSourceFacade;
+
+	@Autowired
+	private StrategySystemDailyReportService strategySystemDailyReportService;
 
 	@Value("${RewardRateEnabled}")
 	private boolean RewardRateEnabled;
@@ -122,6 +127,12 @@ public class BatchStart implements CommandLineRunner {
 
 	@Value("${external.digest.cron:0 30 8 * * ?}")
 	private String externalDigestCron;
+
+	@Value("${strategy.system.report.enabled:true}")
+	private boolean strategySystemReportEnabled;
+
+	@Value("${strategy.system.report.cron:0 35 8 * * ?}")
+	private String strategySystemReportCron;
 
 	@Override
 	public void run(String... args) throws Exception {
@@ -222,6 +233,13 @@ public class BatchStart implements CommandLineRunner {
 		return path;
 	}
 
+	public String runStrategySystemDailyReportJob() {
+		log.info("runStrategySystemDailyReportJob start");
+		String path = strategySystemDailyReportService.generateDailyReport();
+		log.info("runStrategySystemDailyReportJob end, report:{}", path);
+		return path;
+	}
+
 	private void registerExternalSourceJobs() {
 		if (!externalSourceEnabled) {
 			log.info("external source jobs skipped, enabled:false");
@@ -238,6 +256,9 @@ public class BatchStart implements CommandLineRunner {
 		}
 		schedule.updateJob(externalNormalizeCron, "externalSourceNormalizeJob", ExternalSourceNormalizeJob.class, this);
 		schedule.updateJob(externalDigestCron, "externalSourceDigestReportJob", ExternalSourceDigestReportJob.class, this);
+		if (strategySystemReportEnabled) {
+			schedule.updateJob(strategySystemReportCron, "strategySystemDailyReportJob", StrategySystemDailyReportJob.class, this);
+		}
 		if (externalSourceDispatchEnabled) {
 			externalSourceFacade.initDispatchClientIfNeeded();
 			schedule.updateJob(externalDispatchCron, "externalSourceDispatchJob", ExternalSourceDispatchJob.class, this);
@@ -247,10 +268,10 @@ public class BatchStart implements CommandLineRunner {
 	}
 
 	private void logExternalSourceConfig() {
-		log.info("external source config enabled:{} dispatchEnabled:{} clickHouseDefault:{} tradingViewEnabled:{} fmzEnabled:{} gitHubEnabled:{} tradingViewCron:{} fmzCron:{} gitHubCron:{} normalizeCron:{} dispatchCron:{} digestCron:{}",
+		log.info("external source config enabled:{} dispatchEnabled:{} clickHouseDefault:{} tradingViewEnabled:{} fmzEnabled:{} gitHubEnabled:{} tradingViewCron:{} fmzCron:{} gitHubCron:{} normalizeCron:{} dispatchCron:{} digestCron:{} systemReportEnabled:{} systemReportCron:{}",
 				externalSourceEnabled, externalSourceDispatchEnabled, clickHouseDefault, tradingViewEnabled, fmzEnabled,
 				gitHubEnabled, tradingViewCron, fmzCron, gitHubCron, externalNormalizeCron, externalDispatchCron,
-				externalDigestCron);
+				externalDigestCron, strategySystemReportEnabled, strategySystemReportCron);
 	}
 
 }
