@@ -1,6 +1,8 @@
 package com.app.dc.service.externalsource;
 
 import com.app.common.utils.JsonUtils;
+import com.app.dc.pipeline.StrategyPipelineModels;
+import com.app.dc.pipeline.StrategyPipelineService;
 import com.app.dc.service.externalsource.ExternalSourceModels.CountRow;
 import com.app.dc.service.externalsource.ExternalSourceModels.NormRecord;
 import com.app.dc.service.externalsource.ExternalSourceModels.RawRecord;
@@ -60,6 +62,9 @@ public class ExternalSourceFacade {
 
     @Autowired
     private ExternalSourceHttpSupport httpSupport;
+
+    @Autowired(required = false)
+    private StrategyPipelineService strategyPipelineService;
 
     @Autowired(required = false)
     private INDSvrClient indSvrClient;
@@ -254,10 +259,26 @@ public class ExternalSourceFacade {
         List<RawRecord> rows = externalSourceDao.pullLatestRawByStatus("NEW", Math.max(1, normalizeBatchSize));
         int processed = 0;
         for (RawRecord raw : rows) {
+            Map<String, Object> rawPayload = parseJsonMap(raw == null ? null : raw.payload);
+            String runId = ensurePipelineRunId(raw == null ? null : raw.sourceType,
+                    raw == null ? null : raw.externalId,
+                    null,
+                    null,
+                    rawPayload);
             try {
                 NormRecord norm = buildNorm(raw);
                 if (norm == null) {
                     externalSourceDao.markRawStatus(raw.id, "IGNORED", "{\"reason\":\"normalize_empty\"}");
+                    markPipeline(raw == null ? null : raw.sourceType,
+                            raw == null ? null : raw.externalId,
+                            null,
+                            null,
+                            StrategyPipelineModels.NORMALIZE,
+                            StrategyPipelineModels.SKIPPED,
+                            "NORMALIZE_EMPTY",
+                            null,
+                            rawPayload,
+                            runId);
                     continue;
                 }
                 boolean duplicateNorm = externalSourceDao.existsNormFingerprint(norm.scene, norm.strategyName, norm.fingerprint)
@@ -269,6 +290,16 @@ public class ExternalSourceFacade {
                     payload.put("strategyName", norm.strategyName);
                     payload.put("canonicalUrl", norm.canonicalUrl);
                     externalSourceDao.markRawStatus(raw.id, "IGNORED", JsonUtils.Serializer(payload));
+                    markPipeline(raw == null ? null : raw.sourceType,
+                            norm.id,
+                            norm.strategyName,
+                            null,
+                            StrategyPipelineModels.NORMALIZE,
+                            StrategyPipelineModels.SKIPPED,
+                            "DUPLICATE_NORM",
+                            null,
+                            payload,
+                            runId);
                     continue;
                 }
                 norm.status = "READY";
@@ -280,6 +311,16 @@ public class ExternalSourceFacade {
                     payload.put("strategyName", norm.strategyName);
                     payload.put("canonicalUrl", norm.canonicalUrl);
                     externalSourceDao.markRawStatus(raw.id, "IGNORED", JsonUtils.Serializer(payload));
+                    markPipeline(raw == null ? null : raw.sourceType,
+                            norm.id,
+                            norm.strategyName,
+                            null,
+                            StrategyPipelineModels.NORMALIZE,
+                            StrategyPipelineModels.SKIPPED,
+                            "DUPLICATE_NORM",
+                            null,
+                            payload,
+                            runId);
                     continue;
                 }
                 Map<String, Object> payload = new LinkedHashMap<String, Object>();
@@ -288,10 +329,31 @@ public class ExternalSourceFacade {
                 payload.put("scene", norm.scene);
                 payload.put("strategyName", norm.strategyName);
                 externalSourceDao.markRawStatus(raw.id, "NORMALIZED", JsonUtils.Serializer(payload));
+                payload.put(StrategyPipelineService.PIPELINE_RUN_ID, runId);
+                markPipeline(norm.sourceType,
+                        norm.id,
+                        norm.strategyName,
+                        null,
+                        StrategyPipelineModels.NORMALIZE,
+                        StrategyPipelineModels.SUCCESS,
+                        "",
+                        null,
+                        payload,
+                        runId);
                 processed++;
             } catch (Exception e) {
                 log.error("ExternalSourceFacade normalize error, rawId:{}", raw.id, e);
                 externalSourceDao.markRawStatus(raw.id, "ERROR", "{\"reason\":\"normalize_exception\"}");
+                markPipeline(raw == null ? null : raw.sourceType,
+                        raw == null ? null : raw.externalId,
+                        null,
+                        null,
+                        StrategyPipelineModels.NORMALIZE,
+                        StrategyPipelineModels.FAILED,
+                        "NORMALIZE_EXCEPTION",
+                        null,
+                        rawPayload,
+                        runId);
             }
         }
         log.info("ExternalSourceFacade normalizeReady done, input:{}, processed:{}", rows.size(), processed);
@@ -307,8 +369,25 @@ public class ExternalSourceFacade {
         List<NormRecord> rows = externalSourceDao.pullLatestNormByStatus("READY", Math.max(1, dispatchBatchSize));
         int dispatched = 0;
         for (NormRecord row : rows) {
+            Map<String, Object> normPayload = parseJsonMap(row == null ? null : row.payload);
+            String runId = ensurePipelineRunId(row == null ? null : row.sourceType,
+                    row == null ? null : row.id,
+                    row == null ? null : row.strategyName,
+                    null,
+                    normPayload);
+            LocalDateTime stageStart = LocalDateTime.now();
             try {
                 externalSourceDao.markNormStatus(row.id, "DISPATCHING", row.payload);
+                markPipeline(row.sourceType,
+                        row.id,
+                        row.strategyName,
+                        null,
+                        StrategyPipelineModels.DISPATCH,
+                        StrategyPipelineModels.RUNNING,
+                        "",
+                        stageStart,
+                        normPayload,
+                        runId);
                 LinkedHashMap<String, Object> request = new LinkedHashMap<String, Object>();
                 request.put("sourceType", "EXTERNAL_SOURCE");
                 request.put("sourceRef", row.id);
@@ -316,21 +395,68 @@ public class ExternalSourceFacade {
                 request.put("description", row.description);
                 request.put("strategyName", row.strategyName);
                 request.put("provider", dispatchProvider);
-                request.put("payload", JsonUtils.Deserialize(row.payload, LinkedHashMap.class));
+                normPayload.put(StrategyPipelineService.PIPELINE_RUN_ID, runId);
+                request.put("payload", normPayload);
                 Map<String, Object> rsp = indSvrClient.requestStrategyCandidateGenerate(request);
                 int code = number(rsp.get("code"));
                 String msg = text(rsp.get("msg"));
                 if (code == 0) {
                     externalSourceDao.markNormStatus(row.id, "GENERATED", JsonUtils.Serializer(rsp));
+                    Map<String, Object> payload = new LinkedHashMap<String, Object>(normPayload);
+                    payload.put("dispatchResponse", rsp);
+                    markPipeline(row.sourceType,
+                            row.id,
+                            row.strategyName,
+                            text(rsp.get("strategyVersion")),
+                            StrategyPipelineModels.DISPATCH,
+                            StrategyPipelineModels.SUCCESS,
+                            "",
+                            stageStart,
+                            payload,
+                            runId);
                 } else if (StringUtils.containsIgnoreCase(msg, "skip")) {
                     externalSourceDao.markNormStatus(row.id, "SKIPPED", JsonUtils.Serializer(rsp));
+                    Map<String, Object> payload = new LinkedHashMap<String, Object>(normPayload);
+                    payload.put("dispatchResponse", rsp);
+                    markPipeline(row.sourceType,
+                            row.id,
+                            row.strategyName,
+                            text(rsp.get("strategyVersion")),
+                            StrategyPipelineModels.DISPATCH,
+                            StrategyPipelineModels.SKIPPED,
+                            defaultIfBlank(msg, "DISPATCH_SKIPPED"),
+                            stageStart,
+                            payload,
+                            runId);
                 } else {
                     externalSourceDao.markNormStatus(row.id, "ERROR", JsonUtils.Serializer(rsp));
+                    Map<String, Object> payload = new LinkedHashMap<String, Object>(normPayload);
+                    payload.put("dispatchResponse", rsp);
+                    markPipeline(row.sourceType,
+                            row.id,
+                            row.strategyName,
+                            text(rsp.get("strategyVersion")),
+                            StrategyPipelineModels.DISPATCH,
+                            StrategyPipelineModels.FAILED,
+                            defaultIfBlank(msg, "DISPATCH_FAILED"),
+                            stageStart,
+                            payload,
+                            runId);
                 }
                 dispatched++;
             } catch (Exception e) {
                 log.error("ExternalSourceFacade dispatch error, normId:{}", row.id, e);
                 externalSourceDao.markNormStatus(row.id, "ERROR", "{\"reason\":\"dispatch_exception\"}");
+                markPipeline(row == null ? null : row.sourceType,
+                        row == null ? null : row.id,
+                        row == null ? null : row.strategyName,
+                        null,
+                        StrategyPipelineModels.DISPATCH,
+                        StrategyPipelineModels.FAILED,
+                        "DISPATCH_EXCEPTION",
+                        stageStart,
+                        normPayload,
+                        runId);
             }
         }
         log.info("ExternalSourceFacade dispatchReady done, rows:{}, dispatched:{}", rows.size(), dispatched);
@@ -493,7 +619,7 @@ public class ExternalSourceFacade {
         norm.fingerprint = fingerprint;
         norm.createTime = ExternalSourceUtils.nowText();
         norm.updateTime = norm.createTime;
-        Map<String, Object> payload = new LinkedHashMap<String, Object>();
+        Map<String, Object> payload = parseJsonMap(raw.payload);
         payload.put("rawId", raw.id);
         payload.put("sourceType", raw.sourceType);
         payload.put("siteName", raw.siteName);
@@ -672,10 +798,28 @@ public class ExternalSourceFacade {
                            Map<String, Object> payload) {
         String finalExternalId = StringUtils.defaultIfBlank(externalId, ExternalSourceUtils.sha256(canonicalUrl));
         String contentHash = ExternalSourceUtils.sha256(title + "\n" + content);
+        Map<String, Object> pipelinePayload = payload == null
+                ? new LinkedHashMap<String, Object>()
+                : new LinkedHashMap<String, Object>(payload);
+        String runId = ensurePipelineRunId(sourceType == null ? null : sourceType.name(),
+                finalExternalId,
+                null,
+                null,
+                pipelinePayload);
         if (externalSourceDao.existsRawByExternalId(sourceType.name(), finalExternalId)
                 || externalSourceDao.existsRawByCanonicalUrl(sourceType.name(), canonicalUrl)
                 || externalSourceDao.existsSameRawContent(sourceType.name(), finalExternalId, contentHash)) {
             log.info("persistRaw skip duplicate, sourceType:{}, externalId:{}, canonicalUrl:{}", sourceType.name(), finalExternalId, canonicalUrl);
+            markPipeline(sourceType == null ? null : sourceType.name(),
+                    finalExternalId,
+                    null,
+                    null,
+                    StrategyPipelineModels.DISCOVER,
+                    StrategyPipelineModels.SKIPPED,
+                    "DUPLICATE_RAW",
+                    null,
+                    pipelinePayload,
+                    runId);
             return 0;
         }
         RawRecord row = new RawRecord();
@@ -696,14 +840,87 @@ public class ExternalSourceFacade {
         row.content = ExternalSourceUtils.truncate(content, 16000);
         row.status = "NEW";
         row.createTime = ExternalSourceUtils.nowText();
-        row.payload = JsonUtils.Serializer(payload == null ? Collections.emptyMap() : payload);
+        pipelinePayload.put(StrategyPipelineService.PIPELINE_RUN_ID, runId);
+        row.payload = JsonUtils.Serializer(pipelinePayload);
         boolean inserted = externalSourceDao.insertRawIfAbsent(row);
         if (!inserted) {
             log.info("persistRaw skip duplicate by insert guard, sourceType:{}, externalId:{}, canonicalUrl:{}",
                     sourceType.name(), finalExternalId, canonicalUrl);
+            markPipeline(sourceType == null ? null : sourceType.name(),
+                    finalExternalId,
+                    null,
+                    null,
+                    StrategyPipelineModels.DISCOVER,
+                    StrategyPipelineModels.SKIPPED,
+                    "DUPLICATE_RAW",
+                    null,
+                    pipelinePayload,
+                    runId);
             return 0;
         }
+        Map<String, Object> discoverPayload = new LinkedHashMap<String, Object>(pipelinePayload);
+        discoverPayload.put("rawId", row.id);
+        discoverPayload.put("canonicalUrl", canonicalUrl);
+        markPipeline(sourceType == null ? null : sourceType.name(),
+                finalExternalId,
+                null,
+                null,
+                StrategyPipelineModels.DISCOVER,
+                StrategyPipelineModels.SUCCESS,
+                "",
+                null,
+                discoverPayload,
+                runId);
         return 1;
+    }
+
+    private Map<String, Object> parseJsonMap(String json) {
+        if (strategyPipelineService == null) {
+            return new LinkedHashMap<String, Object>();
+        }
+        return strategyPipelineService.parsePayload(json);
+    }
+
+    private String ensurePipelineRunId(String sourceType,
+                                       String sourceRef,
+                                       String strategyName,
+                                       String strategyVersion,
+                                       Map<String, Object> payload) {
+        if (strategyPipelineService == null) {
+            return "";
+        }
+        return strategyPipelineService.ensureRunId(sourceType, sourceRef, strategyName, strategyVersion, payload);
+    }
+
+    private void markPipeline(String sourceType,
+                              String sourceRef,
+                              String strategyName,
+                              String strategyVersion,
+                              String stage,
+                              String status,
+                              String reason,
+                              LocalDateTime stageStart,
+                              Map<String, Object> payload,
+                              String runId) {
+        if (strategyPipelineService == null) {
+            return;
+        }
+        Map<String, Object> effectivePayload = payload == null
+                ? new LinkedHashMap<String, Object>()
+                : new LinkedHashMap<String, Object>(payload);
+        if (StringUtils.isNotBlank(runId)) {
+            effectivePayload.put(StrategyPipelineService.PIPELINE_RUN_ID, runId);
+        }
+        strategyPipelineService.markStage(
+                sourceType,
+                sourceRef,
+                strategyName,
+                strategyVersion,
+                stage,
+                status,
+                reason,
+                stageStart,
+                effectivePayload);
     }
 
     private String fetchGitHubReadme(String fullName) {
@@ -1110,6 +1327,10 @@ public class ExternalSourceFacade {
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
         }
+    }
+
+    private String defaultIfBlank(String value, String fallback) {
+        return StringUtils.isBlank(value) ? fallback : value.trim();
     }
 
     private List<String> collectMatches(String text, Pattern pattern) {

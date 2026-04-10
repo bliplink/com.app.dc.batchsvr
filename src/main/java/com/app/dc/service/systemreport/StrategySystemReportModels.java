@@ -38,6 +38,29 @@ public final class StrategySystemReportModels {
         public String payload;
     }
 
+    public static class BlockedRunRow {
+        public String runId;
+        public String sourceType;
+        public String sourceRef;
+        public String strategyName;
+        public String strategyVersion;
+        public String currentStage;
+        public String currentStatus;
+        public String currentReason;
+        public String updateTime;
+        public String payload;
+    }
+
+    public static class RuntimeStrategyRow {
+        public String strategyName;
+        public String strategyVersion;
+        public Long signalCount;
+        public Long orderCount;
+        public Long tradeCount;
+        public Double realizedPnl;
+        public Long errorCount;
+    }
+
     public static class ReportSummary {
         public String reportId;
         public String reportDate;
@@ -50,8 +73,11 @@ public final class StrategySystemReportModels {
         public List<CountRow> backtestCounts = new ArrayList<CountRow>();
         public List<CountRow> optimizationCounts = new ArrayList<CountRow>();
         public List<CountRow> releaseCounts = new ArrayList<CountRow>();
+        public List<CountRow> pipelineCounts = new ArrayList<CountRow>();
         public List<CountRow> reviewFactCounts = new ArrayList<CountRow>();
         public List<ActiveLiveRow> activeLives = new ArrayList<ActiveLiveRow>();
+        public List<BlockedRunRow> blockedRuns = new ArrayList<BlockedRunRow>();
+        public List<RuntimeStrategyRow> runtimeRows = new ArrayList<RuntimeStrategyRow>();
         public List<ReviewFactRow> topReviewFacts = new ArrayList<ReviewFactRow>();
     }
 

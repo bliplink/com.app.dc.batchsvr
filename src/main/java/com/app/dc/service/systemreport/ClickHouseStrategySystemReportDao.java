@@ -1,6 +1,9 @@
 package com.app.dc.service.systemreport;
 
 import com.app.common.db.ClickHouseDBUtils;
+import com.app.dc.pipeline.ClickHouseStrategyPipelineDao;
+import com.app.dc.pipeline.StrategyPipelineModels.PipelineBlockedRunRow;
+import com.app.dc.pipeline.StrategyPipelineModels.PipelineCountRow;
 import com.gateway.connector.utils.JsonUtils;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
@@ -14,10 +17,12 @@ import java.util.Collections;
 import java.util.List;
 
 import static com.app.dc.service.systemreport.StrategySystemReportModels.ActiveLiveRow;
+import static com.app.dc.service.systemreport.StrategySystemReportModels.BlockedRunRow;
 import static com.app.dc.service.systemreport.StrategySystemReportModels.CountRow;
 import static com.app.dc.service.systemreport.StrategySystemReportModels.ReportItem;
 import static com.app.dc.service.systemreport.StrategySystemReportModels.ReviewFactRow;
 import static com.app.dc.service.systemreport.StrategySystemReportModels.ReportSummary;
+import static com.app.dc.service.systemreport.StrategySystemReportModels.RuntimeStrategyRow;
 
 @Component
 @Slf4j
@@ -25,6 +30,9 @@ public class ClickHouseStrategySystemReportDao {
 
     @Autowired(required = false)
     private ClickHouseDBUtils clickHouseDBUtils;
+
+    @Autowired(required = false)
+    private ClickHouseStrategyPipelineDao strategyPipelineDao;
 
     @Value("${strategy.generation.task.table:dc.strategy_generation_task}")
     private String generationTaskTable;
@@ -43,6 +51,18 @@ public class ClickHouseStrategySystemReportDao {
 
     @Value("${strategy.review.fact.table:dc.strategy_review_fact}")
     private String reviewFactTable;
+
+    @Value("${strategy.pipeline.run.table:dc.strategy_pipeline_run}")
+    private String pipelineRunTable;
+
+    @Value("${signal.table:dc.signal}")
+    private String signalTable;
+
+    @Value("${quant.order.latest.view.table:dc.quant_order_latest_view}")
+    private String quantOrderLatestViewTable;
+
+    @Value("${quant.trade.latest.view.table:dc.quant_trade_latest_view}")
+    private String quantTradeLatestViewTable;
 
     @Value("${strategy.system.daily.report.table:dc.strategy_system_daily_report}")
     private String reportTable;
@@ -117,6 +137,100 @@ public class ClickHouseStrategySystemReportDao {
                 + safe(reviewFactTable, "dc.strategy_review_fact")
                 + " where trade_date >= toDate('" + escape(reportDate) + "') group by severity, fact_type order by severity desc, total desc";
         return queryCountRows(sql);
+    }
+
+    public List<CountRow> countPipelineByStageAndStatusSince(String since) {
+        if (strategyPipelineDao == null || !strategyPipelineDao.ready()) {
+            return Collections.emptyList();
+        }
+        List<PipelineCountRow> rows = strategyPipelineDao.countLatestRunsByStageAndStatusSince(since);
+        if (rows == null || rows.isEmpty()) {
+            return Collections.emptyList();
+        }
+        List<CountRow> result = new java.util.ArrayList<CountRow>();
+        for (PipelineCountRow row : rows) {
+            CountRow item = new CountRow();
+            item.key1 = row.key1;
+            item.key2 = row.key2;
+            item.total = row.total;
+            result.add(item);
+        }
+        return result;
+    }
+
+    public List<BlockedRunRow> loadBlockedRunsSince(String since, int limit) {
+        if (strategyPipelineDao == null || !strategyPipelineDao.ready()) {
+            return Collections.emptyList();
+        }
+        List<PipelineBlockedRunRow> rows = strategyPipelineDao.loadLatestBlockedRunsSince(since, limit);
+        if (rows == null || rows.isEmpty()) {
+            return Collections.emptyList();
+        }
+        List<BlockedRunRow> result = new java.util.ArrayList<BlockedRunRow>();
+        for (PipelineBlockedRunRow row : rows) {
+            BlockedRunRow item = new BlockedRunRow();
+            item.runId = row.runId;
+            item.sourceType = row.sourceType;
+            item.sourceRef = row.sourceRef;
+            item.strategyName = row.strategyName;
+            item.strategyVersion = row.strategyVersion;
+            item.currentStage = row.currentStage;
+            item.currentStatus = row.currentStatus;
+            item.currentReason = row.currentReason;
+            item.updateTime = row.updateTime;
+            item.payload = row.payload;
+            result.add(item);
+        }
+        return result;
+    }
+
+    public List<RuntimeStrategyRow> loadRuntimeStrategyRows(String reportDate) {
+        if (!ready()) {
+            return Collections.emptyList();
+        }
+        String sql = "select strategyName as strategyName, strategyVersion as strategyVersion,"
+                + " sum(signalCount) as signalCount,"
+                + " sum(orderCount) as orderCount,"
+                + " sum(tradeCount) as tradeCount,"
+                + " round(sum(realizedPnl), 8) as realizedPnl,"
+                + " sum(errorCount) as errorCount"
+                + " from ("
+                + " select strategyName, strategyVersion, count() as signalCount, 0 as orderCount, 0 as tradeCount,"
+                + " 0.0 as realizedPnl, 0 as errorCount"
+                + " from " + safe(signalTable, "dc.signal")
+                + " where tradeDate >= toDate('" + escape(reportDate) + "') and strategyName != ''"
+                + " group by strategyName, strategyVersion"
+                + " union all "
+                + " select strategyName, strategyVersion, 0 as signalCount, count() as orderCount, 0 as tradeCount,"
+                + " 0.0 as realizedPnl, 0 as errorCount"
+                + " from " + safe(quantOrderLatestViewTable, "dc.quant_order_latest_view")
+                + " where tradeDate >= toDate('" + escape(reportDate) + "') and strategyName != ''"
+                + " and source in ('live', 'order_live')"
+                + " group by strategyName, strategyVersion"
+                + " union all "
+                + " select strategyName, strategyVersion, 0 as signalCount, 0 as orderCount, count() as tradeCount,"
+                + " sum(ifNull(realizedPnl, 0)) as realizedPnl, 0 as errorCount"
+                + " from " + safe(quantTradeLatestViewTable, "dc.quant_trade_latest_view")
+                + " where tradeDate >= toDate('" + escape(reportDate) + "') and strategyName != ''"
+                + " and source in ('live', 'order_live')"
+                + " group by strategyName, strategyVersion"
+                + " union all "
+                + " select strategy_name as strategyName, strategy_version as strategyVersion,"
+                + " 0 as signalCount, 0 as orderCount, 0 as tradeCount,"
+                + " 0.0 as realizedPnl, count() as errorCount"
+                + " from " + safe(reviewFactTable, "dc.strategy_review_fact")
+                + " where trade_date >= toDate('" + escape(reportDate) + "') and severity > 0 and strategy_name != ''"
+                + " group by strategy_name, strategy_version"
+                + " ) x group by strategyName, strategyVersion"
+                + " order by realizedPnl desc, signalCount desc, strategyName asc";
+        try {
+            List<RuntimeStrategyRow> rows =
+                    ClickHouseDBUtils.queryList(sql, new Object[]{}, RuntimeStrategyRow.class);
+            return rows == null ? Collections.<RuntimeStrategyRow>emptyList() : rows;
+        } catch (Exception e) {
+            log.error("loadRuntimeStrategyRows error, reportDate:{}", reportDate, e);
+            return Collections.emptyList();
+        }
     }
 
     public List<ReviewFactRow> loadTopReviewFacts(String reportDate, int limit) {
