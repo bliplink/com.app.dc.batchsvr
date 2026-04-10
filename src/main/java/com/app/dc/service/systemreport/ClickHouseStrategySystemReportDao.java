@@ -19,10 +19,15 @@ import java.util.List;
 import static com.app.dc.service.systemreport.StrategySystemReportModels.ActiveLiveRow;
 import static com.app.dc.service.systemreport.StrategySystemReportModels.BlockedRunRow;
 import static com.app.dc.service.systemreport.StrategySystemReportModels.CountRow;
+import static com.app.dc.service.systemreport.StrategySystemReportModels.GenerationDetailRow;
+import static com.app.dc.service.systemreport.StrategySystemReportModels.NormDetailRow;
+import static com.app.dc.service.systemreport.StrategySystemReportModels.OptimizationDetailRow;
+import static com.app.dc.service.systemreport.StrategySystemReportModels.PublishDetailRow;
 import static com.app.dc.service.systemreport.StrategySystemReportModels.ReportItem;
 import static com.app.dc.service.systemreport.StrategySystemReportModels.ReviewFactRow;
 import static com.app.dc.service.systemreport.StrategySystemReportModels.ReportSummary;
 import static com.app.dc.service.systemreport.StrategySystemReportModels.RuntimeStrategyRow;
+import static com.app.dc.service.systemreport.StrategySystemReportModels.BacktestDetailRow;
 
 @Component
 @Slf4j
@@ -156,6 +161,163 @@ public class ClickHouseStrategySystemReportDao {
             result.add(item);
         }
         return result;
+    }
+
+    public List<NormDetailRow> loadLatestNormDetailsSince(String since, int limit) {
+        if (!ready()) {
+            return Collections.emptyList();
+        }
+        String table = "dc.strategy_source_norm";
+        String inner = "select "
+                + "id,"
+                + "argMax(source_type, update_time) as sourceType,"
+                + "argMax(site_name, update_time) as siteName,"
+                + "argMax(strategy_name, update_time) as strategyName,"
+                + "argMax(scene, update_time) as scene,"
+                + "argMax(status, update_time) as status,"
+                + "argMax(normalized_title, update_time) as normalizedTitle,"
+                + "argMax(canonical_url, update_time) as canonicalUrl,"
+                + "max(update_time) as updateTime "
+                + "from " + table + " group by id";
+        String sql = "select "
+                + "sourceType as sourceType,"
+                + "siteName as siteName,"
+                + "strategyName as strategyName,"
+                + "'' as strategyVersion,"
+                + "scene as scene,"
+                + "status as status,"
+                + "normalizedTitle as normalizedTitle,"
+                + "canonicalUrl as canonicalUrl,"
+                + "toString(updateTime) as updateTime "
+                + "from (" + inner + ") latest "
+                + "where updateTime >= toDateTime('" + escape(since) + "') "
+                + "order by updateTime desc limit " + Math.max(1, limit);
+        try {
+            List<NormDetailRow> rows = ClickHouseDBUtils.queryList(sql, new Object[]{}, NormDetailRow.class);
+            return rows == null ? Collections.<NormDetailRow>emptyList() : rows;
+        } catch (Exception e) {
+            log.error("loadLatestNormDetailsSince error, since:{}", since, e);
+            return Collections.emptyList();
+        }
+    }
+
+    public List<GenerationDetailRow> loadLatestGenerationDetailsSince(String since, int limit) {
+        if (!ready()) {
+            return Collections.emptyList();
+        }
+        String inner = "select "
+                + "id,"
+                + "argMax(source_type, update_time) as sourceType,"
+                + "argMax(strategy_name, update_time) as strategyName,"
+                + "argMax(strategy_version, update_time) as strategyVersion,"
+                + "argMax(scene, update_time) as scene,"
+                + "argMax(status, update_time) as status,"
+                + "argMax(compile_status, update_time) as compileStatus,"
+                + "max(update_time) as updateTime "
+                + "from " + safe(generationTaskTable, "dc.strategy_generation_task")
+                + " group by id";
+        String sql = "select "
+                + "sourceType as sourceType,"
+                + "strategyName as strategyName,"
+                + "strategyVersion as strategyVersion,"
+                + "scene as scene,"
+                + "status as status,"
+                + "compileStatus as compileStatus,"
+                + "toString(updateTime) as updateTime "
+                + "from (" + inner + ") latest "
+                + "where updateTime >= toDateTime('" + escape(since) + "') "
+                + "order by updateTime desc limit " + Math.max(1, limit);
+        try {
+            List<GenerationDetailRow> rows = ClickHouseDBUtils.queryList(sql, new Object[]{}, GenerationDetailRow.class);
+            return rows == null ? Collections.<GenerationDetailRow>emptyList() : rows;
+        } catch (Exception e) {
+            log.error("loadLatestGenerationDetailsSince error, since:{}", since, e);
+            return Collections.emptyList();
+        }
+    }
+
+    public List<BacktestDetailRow> loadLatestBacktestDetailsSince(String since, int limit) {
+        if (!ready()) {
+            return Collections.emptyList();
+        }
+        String inner = "select "
+                + "id,"
+                + "argMax(strategy_name, update_time) as strategyName,"
+                + "argMax(strategy_version, update_time) as strategyVersion,"
+                + "argMax(baseline_version, update_time) as baselineVersion,"
+                + "argMax(task_type, update_time) as taskType,"
+                + "argMax(status, update_time) as status,"
+                + "argMax(suspend_reason, update_time) as suspendReason,"
+                + "max(update_time) as updateTime "
+                + "from " + safe(backtestTaskTable, "dc.strategy_backtest_task")
+                + " group by id";
+        String sql = "select "
+                + "strategyName as strategyName,"
+                + "strategyVersion as strategyVersion,"
+                + "baselineVersion as baselineVersion,"
+                + "taskType as taskType,"
+                + "status as status,"
+                + "suspendReason as suspendReason,"
+                + "toString(updateTime) as updateTime "
+                + "from (" + inner + ") latest "
+                + "where updateTime >= toDateTime('" + escape(since) + "') "
+                + "order by updateTime desc limit " + Math.max(1, limit);
+        try {
+            List<BacktestDetailRow> rows = ClickHouseDBUtils.queryList(sql, new Object[]{}, BacktestDetailRow.class);
+            return rows == null ? Collections.<BacktestDetailRow>emptyList() : rows;
+        } catch (Exception e) {
+            log.error("loadLatestBacktestDetailsSince error, since:{}", since, e);
+            return Collections.emptyList();
+        }
+    }
+
+    public List<OptimizationDetailRow> loadOptimizationDetailsSince(String since, int limit) {
+        if (!ready()) {
+            return Collections.emptyList();
+        }
+        String sql = "select "
+                + "strategy_name as strategyName,"
+                + "strategy_version as strategyVersion,"
+                + "symbol as symbol,"
+                + "text as text,"
+                + "optimization_mode as optimizationMode,"
+                + "toInt32(ifNull(trial_count, 0)) as trialCount,"
+                + "toInt32(ifNull(best_rank, 0)) as bestRank,"
+                + "best_param_set as bestParamSet,"
+                + "toString(run_time) as runTime "
+                + "from dc.backtest_result "
+                + "where run_time >= toDateTime('" + escape(since) + "') "
+                + "order by run_time desc limit " + Math.max(1, limit);
+        try {
+            List<OptimizationDetailRow> rows = ClickHouseDBUtils.queryList(sql, new Object[]{}, OptimizationDetailRow.class);
+            return rows == null ? Collections.<OptimizationDetailRow>emptyList() : rows;
+        } catch (Exception e) {
+            log.error("loadOptimizationDetailsSince error, since:{}", since, e);
+            return Collections.emptyList();
+        }
+    }
+
+    public List<PublishDetailRow> loadPublishDetailsSince(String since, int limit) {
+        if (!ready()) {
+            return Collections.emptyList();
+        }
+        String sql = "select "
+                + "strategy_name as strategyName,"
+                + "from_version as fromVersion,"
+                + "to_version as toVersion,"
+                + "event_type as eventType,"
+                + "reason as reason,"
+                + "toString(event_time) as eventTime "
+                + "from " + safe(releaseEventTable, "dc.strategy_release_event")
+                + " where event_time >= toDateTime('" + escape(since) + "') "
+                + "order by event_time desc limit " + Math.max(1, limit);
+        try {
+            List<PublishDetailRow> rows = ClickHouseDBUtils.queryList(sql, new Object[]{}, PublishDetailRow.class);
+            return rows == null ? Collections.<PublishDetailRow>emptyList() : rows;
+        } catch (Exception e) {
+            log.error("loadPublishDetailsSince error, since:{}", since, e);
+            return Collections.emptyList();
+        }
     }
 
     public List<BlockedRunRow> loadBlockedRunsSince(String since, int limit) {

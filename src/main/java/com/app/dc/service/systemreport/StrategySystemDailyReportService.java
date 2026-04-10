@@ -3,8 +3,13 @@ package com.app.dc.service.systemreport;
 import com.app.common.utils.JsonUtils;
 import com.app.dc.service.externalsource.ClickHouseExternalSourceDao;
 import com.app.dc.service.systemreport.StrategySystemReportModels.ActiveLiveRow;
+import com.app.dc.service.systemreport.StrategySystemReportModels.BacktestDetailRow;
 import com.app.dc.service.systemreport.StrategySystemReportModels.BlockedRunRow;
 import com.app.dc.service.systemreport.StrategySystemReportModels.CountRow;
+import com.app.dc.service.systemreport.StrategySystemReportModels.GenerationDetailRow;
+import com.app.dc.service.systemreport.StrategySystemReportModels.NormDetailRow;
+import com.app.dc.service.systemreport.StrategySystemReportModels.OptimizationDetailRow;
+import com.app.dc.service.systemreport.StrategySystemReportModels.PublishDetailRow;
 import com.app.dc.service.systemreport.StrategySystemReportModels.ReportFiles;
 import com.app.dc.service.systemreport.StrategySystemReportModels.ReportItem;
 import com.app.dc.service.systemreport.StrategySystemReportModels.ReportSummary;
@@ -24,10 +29,8 @@ import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Map;
 
 @Service
 @Slf4j
@@ -44,8 +47,11 @@ public class StrategySystemDailyReportService {
     @Value("${strategy.system.report.enabled:true}")
     private boolean enabled;
 
-    @Value("${strategy.system.report.reportDir:./data/strategy-system-reports}")
+    @Value("${strategy.system.report.reportDir:../../log/BatchSvr/strategy-system-reports}")
     private String reportDir;
+
+    @Value("${strategy.system.report.detailLimit:50}")
+    private int detailLimit;
 
     public String generateDailyReport() {
         if (!enabled || !systemReportDao.ready()) {
@@ -68,11 +74,17 @@ public class StrategySystemDailyReportService {
         summary.releaseCounts.addAll(systemReportDao.countReleaseEventsByTypeSince(since));
         summary.pipelineCounts.addAll(systemReportDao.countPipelineByStageAndStatusSince(since));
         summary.reviewFactCounts.addAll(systemReportDao.countReviewFactsBySeveritySince(reportDate.toString()));
+        summary.normDetails.addAll(systemReportDao.loadLatestNormDetailsSince(since, detailLimit));
+        summary.generationDetails.addAll(systemReportDao.loadLatestGenerationDetailsSince(since, detailLimit));
+        summary.backtestDetails.addAll(systemReportDao.loadLatestBacktestDetailsSince(since, detailLimit));
+        summary.optimizationDetails.addAll(systemReportDao.loadOptimizationDetailsSince(since, detailLimit));
+        summary.publishDetails.addAll(systemReportDao.loadPublishDetailsSince(since, detailLimit));
         summary.activeLives.addAll(systemReportDao.loadCurrentActiveLives());
         summary.blockedRuns.addAll(systemReportDao.loadBlockedRunsSince(since, 30));
         summary.runtimeRows.addAll(systemReportDao.loadRuntimeStrategyRows(reportDate.toString()));
         summary.topReviewFacts.addAll(systemReportDao.loadTopReviewFacts(reportDate.toString(), 20));
 
+        summary.headline = new LinkedHashMap<String, Object>();
         summary.headline.put("rawTotal", sum(summary.rawCounts));
         summary.headline.put("readyNormTotal", sumByStatus(summary.normCounts, "READY"));
         summary.headline.put("generatedSuccessTotal", sumByStatus(summary.generationCounts, "SUCCESS"));
@@ -110,20 +122,20 @@ public class StrategySystemDailyReportService {
 
     private String buildHtml(ReportSummary summary) {
         StringBuilder html = new StringBuilder();
-        html.append("<html><head><meta charset=\"UTF-8\"><title>Source-Aware 系统日报</title>")
+        html.append("<html><head><meta charset=\"UTF-8\"><title>系统日报</title>")
                 .append("<style>")
                 .append("body{font-family:Segoe UI,Microsoft YaHei,sans-serif;margin:24px;color:#111827;background:#f8fafc;}")
-                .append("h1,h2{margin:0 0 12px 0;} h2{margin-top:28px;}")
+                .append("h1,h2{margin:0 0 12px 0;}h2{margin-top:28px;}")
                 .append(".muted{color:#6b7280;font-size:13px;}")
                 .append(".cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin:16px 0 24px 0;}")
                 .append(".card{background:#fff;border:1px solid #d1d5db;border-radius:10px;padding:12px 14px;}")
-                .append(".label{font-size:12px;color:#6b7280;} .value{font-size:24px;font-weight:700;margin-top:4px;}")
+                .append(".label{font-size:12px;color:#6b7280;}.value{font-size:24px;font-weight:700;margin-top:4px;}")
                 .append("table{border-collapse:collapse;width:100%;margin:12px 0 24px 0;background:#fff;}")
                 .append("th,td{border:1px solid #d1d5db;padding:8px 10px;font-size:13px;text-align:left;vertical-align:top;}")
-                .append("th{background:#f3f4f6;}")
+                .append("th{background:#f3f4f6;}.mono{font-family:Consolas,Menlo,monospace;font-size:12px;}")
                 .append(".ok{color:#047857;font-weight:600;}.bad{color:#b91c1c;font-weight:600;}.warn{color:#b45309;font-weight:600;}")
                 .append("</style></head><body>");
-        html.append("<h1>Source-Aware 系统日报</h1>");
+        html.append("<h1>系统日报</h1>");
         html.append("<div class='muted'>报告日期: ").append(escape(summary.reportDate))
                 .append(" / 生成时间: ").append(escape(summary.generatedAt))
                 .append(" / 统计起点: ").append(escape(summary.since)).append("</div>");
@@ -144,10 +156,15 @@ public class StrategySystemDailyReportService {
 
         appendCountTable(html, "1. 采集阶段 Raw", summary.rawCounts, "来源", "状态", "数量");
         appendCountTable(html, "1. 采集阶段 Norm", summary.normCounts, "来源", "状态", "数量");
-        appendCountTable(html, "2. 生成阶段", summary.generationCounts, "来源类型", "状态", "数量");
-        appendCountTable(html, "3. 回测阶段", summary.backtestCounts, "任务类型", "状态", "数量");
-        appendCountTable(html, "4. 参数优化阶段", summary.optimizationCounts, "阶段", "状态", "数量");
-        appendCountTable(html, "5. 发布阶段", summary.releaseCounts, "事件类型", "状态", "数量");
+        appendNormDetails(html, summary.normDetails);
+        appendCountTable(html, "2. 生成阶段统计", summary.generationCounts, "来源类型", "状态", "数量");
+        appendGenerationDetails(html, summary.generationDetails);
+        appendCountTable(html, "3. 回测阶段统计", summary.backtestCounts, "任务类型", "状态", "数量");
+        appendBacktestDetails(html, summary.backtestDetails);
+        appendCountTable(html, "4. 参数优化阶段统计", summary.optimizationCounts, "阶段", "状态", "数量");
+        appendOptimizationDetails(html, summary.optimizationDetails);
+        appendCountTable(html, "5. 发布阶段统计", summary.releaseCounts, "事件类型", "状态", "数量");
+        appendPublishDetails(html, summary.publishDetails);
         appendCountTable(html, "流水线当前状态", summary.pipelineCounts, "阶段", "状态", "数量");
         appendActiveLives(html, summary.activeLives);
         appendRuntimeRows(html, summary.runtimeRows);
@@ -180,6 +197,98 @@ public class StrategySystemDailyReportService {
                 html.append("<tr><td>").append(escape(row.key1)).append("</td><td>")
                         .append(escape(row.key2)).append("</td><td>")
                         .append(row.total == null ? 0L : row.total).append("</td></tr>");
+            }
+        }
+        html.append("</table>");
+    }
+
+    private void appendNormDetails(StringBuilder html, List<NormDetailRow> rows) {
+        html.append("<h2>1. 采集归一化策略池明细</h2><table><tr><th>来源</th><th>站点</th><th>策略名</th><th>版本</th><th>场景</th><th>状态</th><th>标题</th><th>更新时间</th></tr>");
+        if (rows == null || rows.isEmpty()) {
+            html.append("<tr><td colspan='8'>无数据</td></tr>");
+        } else {
+            for (NormDetailRow row : rows) {
+                html.append("<tr><td>").append(escape(row.sourceType)).append("</td><td>")
+                        .append(escape(row.siteName)).append("</td><td>")
+                        .append(escape(row.strategyName)).append("</td><td>")
+                        .append(escape(row.strategyVersion)).append("</td><td>")
+                        .append(escape(row.scene)).append("</td><td>")
+                        .append(escape(row.status)).append("</td><td>")
+                        .append(escape(row.normalizedTitle)).append("</td><td>")
+                        .append(escape(row.updateTime)).append("</td></tr>");
+            }
+        }
+        html.append("</table>");
+    }
+
+    private void appendGenerationDetails(StringBuilder html, List<GenerationDetailRow> rows) {
+        html.append("<h2>2. 生成阶段明细</h2><table><tr><th>来源</th><th>策略名</th><th>版本</th><th>场景</th><th>生成状态</th><th>编译状态</th><th>更新时间</th></tr>");
+        if (rows == null || rows.isEmpty()) {
+            html.append("<tr><td colspan='7'>无数据</td></tr>");
+        } else {
+            for (GenerationDetailRow row : rows) {
+                html.append("<tr><td>").append(escape(row.sourceType)).append("</td><td>")
+                        .append(escape(row.strategyName)).append("</td><td>")
+                        .append(escape(row.strategyVersion)).append("</td><td>")
+                        .append(escape(row.scene)).append("</td><td class='").append(cssStatus(row.status)).append("'>")
+                        .append(escape(row.status)).append("</td><td>")
+                        .append(escape(row.compileStatus)).append("</td><td>")
+                        .append(escape(row.updateTime)).append("</td></tr>");
+            }
+        }
+        html.append("</table>");
+    }
+
+    private void appendBacktestDetails(StringBuilder html, List<BacktestDetailRow> rows) {
+        html.append("<h2>3. 回测阶段明细</h2><table><tr><th>策略名</th><th>版本</th><th>基线版本</th><th>任务类型</th><th>状态</th><th>挂起原因</th><th>更新时间</th></tr>");
+        if (rows == null || rows.isEmpty()) {
+            html.append("<tr><td colspan='7'>无数据</td></tr>");
+        } else {
+            for (BacktestDetailRow row : rows) {
+                html.append("<tr><td>").append(escape(row.strategyName)).append("</td><td>")
+                        .append(escape(row.strategyVersion)).append("</td><td>")
+                        .append(escape(row.baselineVersion)).append("</td><td>")
+                        .append(escape(row.taskType)).append("</td><td class='").append(cssStatus(row.status)).append("'>")
+                        .append(escape(row.status)).append("</td><td>")
+                        .append(escape(row.suspendReason)).append("</td><td>")
+                        .append(escape(row.updateTime)).append("</td></tr>");
+            }
+        }
+        html.append("</table>");
+    }
+
+    private void appendOptimizationDetails(StringBuilder html, List<OptimizationDetailRow> rows) {
+        html.append("<h2>4. 参数优化阶段明细</h2><table><tr><th>策略名</th><th>版本</th><th>标的</th><th>周期</th><th>模式</th><th>Trial 数</th><th>最佳排名</th><th>最优参数</th><th>运行时间</th></tr>");
+        if (rows == null || rows.isEmpty()) {
+            html.append("<tr><td colspan='9'>无数据</td></tr>");
+        } else {
+            for (OptimizationDetailRow row : rows) {
+                html.append("<tr><td>").append(escape(row.strategyName)).append("</td><td>")
+                        .append(escape(row.strategyVersion)).append("</td><td>")
+                        .append(escape(row.symbol)).append("</td><td>")
+                        .append(escape(row.text)).append("</td><td>")
+                        .append(escape(row.optimizationMode)).append("</td><td>")
+                        .append(row.trialCount == null ? 0 : row.trialCount).append("</td><td>")
+                        .append(row.bestRank == null ? 0 : row.bestRank).append("</td><td class='mono'>")
+                        .append(escape(row.bestParamSet)).append("</td><td>")
+                        .append(escape(row.runTime)).append("</td></tr>");
+            }
+        }
+        html.append("</table>");
+    }
+
+    private void appendPublishDetails(StringBuilder html, List<PublishDetailRow> rows) {
+        html.append("<h2>5. 发布阶段明细</h2><table><tr><th>策略名</th><th>旧版本</th><th>新版本</th><th>事件</th><th>原因</th><th>时间</th></tr>");
+        if (rows == null || rows.isEmpty()) {
+            html.append("<tr><td colspan='6'>无数据</td></tr>");
+        } else {
+            for (PublishDetailRow row : rows) {
+                html.append("<tr><td>").append(escape(row.strategyName)).append("</td><td>")
+                        .append(escape(row.fromVersion)).append("</td><td>")
+                        .append(escape(row.toVersion)).append("</td><td>")
+                        .append(escape(row.eventType)).append("</td><td>")
+                        .append(escape(row.reason)).append("</td><td>")
+                        .append(escape(row.eventTime)).append("</td></tr>");
             }
         }
         html.append("</table>");
@@ -269,12 +378,58 @@ public class StrategySystemDailyReportService {
         addCountItems(items, summary.reportId, summary.reportDate, "publish", summary.releaseCounts);
         addCountItems(items, summary.reportId, summary.reportDate, "pipeline", summary.pipelineCounts);
         addCountItems(items, summary.reportId, summary.reportDate, "review_fact", summary.reviewFactCounts);
+
+        for (NormDetailRow row : summary.normDetails) {
+            ReportItem item = initItem(summary.reportId, summary.reportDate, "discover.norm.detail");
+            item.itemKey = safe(row.strategyName) + "@" + safe(row.strategyVersion);
+            item.itemName = safe(row.strategyName);
+            item.metricValue = 1D;
+            item.metricText = safe(row.status) + " / " + safe(row.scene);
+            item.payload = JsonUtils.Serializer(row);
+            items.add(item);
+        }
+        for (GenerationDetailRow row : summary.generationDetails) {
+            ReportItem item = initItem(summary.reportId, summary.reportDate, "generate.detail");
+            item.itemKey = safe(row.strategyName) + "@" + safe(row.strategyVersion);
+            item.itemName = safe(row.strategyName);
+            item.metricValue = 1D;
+            item.metricText = safe(row.status) + " / compile=" + safe(row.compileStatus);
+            item.payload = JsonUtils.Serializer(row);
+            items.add(item);
+        }
+        for (BacktestDetailRow row : summary.backtestDetails) {
+            ReportItem item = initItem(summary.reportId, summary.reportDate, "backtest.detail");
+            item.itemKey = safe(row.strategyName) + "@" + safe(row.strategyVersion);
+            item.itemName = safe(row.strategyName);
+            item.metricValue = 1D;
+            item.metricText = safe(row.status) + " / " + safe(row.taskType);
+            item.payload = JsonUtils.Serializer(row);
+            items.add(item);
+        }
+        for (OptimizationDetailRow row : summary.optimizationDetails) {
+            ReportItem item = initItem(summary.reportId, summary.reportDate, "optimization.detail");
+            item.itemKey = safe(row.strategyName) + "@" + safe(row.strategyVersion);
+            item.itemName = safe(row.strategyName);
+            item.metricValue = row.bestRank == null ? 0D : row.bestRank.doubleValue();
+            item.metricText = "trials=" + (row.trialCount == null ? 0 : row.trialCount);
+            item.payload = JsonUtils.Serializer(row);
+            items.add(item);
+        }
+        for (PublishDetailRow row : summary.publishDetails) {
+            ReportItem item = initItem(summary.reportId, summary.reportDate, "publish.detail");
+            item.itemKey = safe(row.strategyName) + "@" + safe(row.toVersion);
+            item.itemName = safe(row.strategyName);
+            item.metricValue = 1D;
+            item.metricText = safe(row.eventType) + " / " + safe(row.reason);
+            item.payload = JsonUtils.Serializer(row);
+            items.add(item);
+        }
         for (ActiveLiveRow row : summary.activeLives) {
             ReportItem item = initItem(summary.reportId, summary.reportDate, "live.active");
-            item.itemKey = row.strategyName + "@" + row.strategyVersion;
-            item.itemName = row.scene;
+            item.itemKey = safe(row.strategyName) + "@" + safe(row.strategyVersion);
+            item.itemName = safe(row.scene);
             item.metricValue = 1D;
-            item.metricText = row.symbolScope + " / " + row.textScope;
+            item.metricText = safe(row.symbolScope) + " / " + safe(row.textScope);
             item.payload = JsonUtils.Serializer(row);
             items.add(item);
         }

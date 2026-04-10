@@ -27,6 +27,59 @@ public final class StrategySystemReportModels {
         public String description;
     }
 
+    public static class NormDetailRow {
+        public String sourceType;
+        public String siteName;
+        public String strategyName;
+        public String strategyVersion;
+        public String scene;
+        public String status;
+        public String normalizedTitle;
+        public String canonicalUrl;
+        public String updateTime;
+    }
+
+    public static class GenerationDetailRow {
+        public String sourceType;
+        public String strategyName;
+        public String strategyVersion;
+        public String scene;
+        public String status;
+        public String compileStatus;
+        public String updateTime;
+    }
+
+    public static class BacktestDetailRow {
+        public String strategyName;
+        public String strategyVersion;
+        public String baselineVersion;
+        public String taskType;
+        public String status;
+        public String suspendReason;
+        public String updateTime;
+    }
+
+    public static class OptimizationDetailRow {
+        public String strategyName;
+        public String strategyVersion;
+        public String symbol;
+        public String text;
+        public String optimizationMode;
+        public Integer trialCount;
+        public Integer bestRank;
+        public String bestParamSet;
+        public String runTime;
+    }
+
+    public static class PublishDetailRow {
+        public String strategyName;
+        public String fromVersion;
+        public String toVersion;
+        public String eventType;
+        public String reason;
+        public String eventTime;
+    }
+
     public static class ReviewFactRow {
         public String strategyName;
         public String strategyVersion;
@@ -75,6 +128,11 @@ public final class StrategySystemReportModels {
         public List<CountRow> releaseCounts = new ArrayList<CountRow>();
         public List<CountRow> pipelineCounts = new ArrayList<CountRow>();
         public List<CountRow> reviewFactCounts = new ArrayList<CountRow>();
+        public List<NormDetailRow> normDetails = new ArrayList<NormDetailRow>();
+        public List<GenerationDetailRow> generationDetails = new ArrayList<GenerationDetailRow>();
+        public List<BacktestDetailRow> backtestDetails = new ArrayList<BacktestDetailRow>();
+        public List<OptimizationDetailRow> optimizationDetails = new ArrayList<OptimizationDetailRow>();
+        public List<PublishDetailRow> publishDetails = new ArrayList<PublishDetailRow>();
         public List<ActiveLiveRow> activeLives = new ArrayList<ActiveLiveRow>();
         public List<BlockedRunRow> blockedRuns = new ArrayList<BlockedRunRow>();
         public List<RuntimeStrategyRow> runtimeRows = new ArrayList<RuntimeStrategyRow>();
