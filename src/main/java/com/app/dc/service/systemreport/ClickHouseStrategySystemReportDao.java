@@ -470,6 +470,65 @@ public class ClickHouseStrategySystemReportDao {
         }
     }
 
+    public StrategySystemDailyReportRow loadLatestReport() {
+        if (!ready()) {
+            return null;
+        }
+        String sql = "select "
+                + "id as id,"
+                + "toString(report_date) as reportDate,"
+                + "toString(generated_at) as generatedAt,"
+                + "summary_json as summaryJson,"
+                + "html_path as htmlPath,"
+                + "json_path as jsonPath,"
+                + "payload as payload "
+                + "from " + safe(reportTable, "dc.strategy_system_daily_report")
+                + " order by report_date desc, generated_at desc limit 1";
+        List<StrategySystemDailyReportRow> rows = queryReportRows(sql);
+        return rows.isEmpty() ? null : rows.get(0);
+    }
+
+    public StrategySystemDailyReportRow loadReportByDate(String reportDate) {
+        if (!ready() || StringUtils.isBlank(reportDate)) {
+            return null;
+        }
+        String date = reportDate.trim();
+        if (!date.matches("\\d{4}-\\d{2}-\\d{2}")) {
+            return null;
+        }
+        String sql = "select "
+                + "id as id,"
+                + "toString(report_date) as reportDate,"
+                + "toString(generated_at) as generatedAt,"
+                + "summary_json as summaryJson,"
+                + "html_path as htmlPath,"
+                + "json_path as jsonPath,"
+                + "payload as payload "
+                + "from " + safe(reportTable, "dc.strategy_system_daily_report")
+                + " where report_date = toDate('" + escape(date) + "')"
+                + " order by generated_at desc limit 1";
+        List<StrategySystemDailyReportRow> rows = queryReportRows(sql);
+        return rows.isEmpty() ? null : rows.get(0);
+    }
+
+    public List<StrategySystemDailyReportRow> loadRecentReports(int limit) {
+        if (!ready()) {
+            return Collections.emptyList();
+        }
+        int size = Math.max(1, limit);
+        String sql = "select "
+                + "id as id,"
+                + "toString(report_date) as reportDate,"
+                + "toString(generated_at) as generatedAt,"
+                + "'' as summaryJson,"
+                + "html_path as htmlPath,"
+                + "json_path as jsonPath,"
+                + "'' as payload "
+                + "from " + safe(reportTable, "dc.strategy_system_daily_report")
+                + " order by report_date desc, generated_at desc limit " + size;
+        return queryReportRows(sql);
+    }
+
     private List<CountRow> countLatestByStatus(String table,
                                                String idField,
                                                String key1Field,
@@ -500,6 +559,17 @@ public class ClickHouseStrategySystemReportDao {
         }
     }
 
+    private List<StrategySystemDailyReportRow> queryReportRows(String sql) {
+        try {
+            List<StrategySystemDailyReportRow> rows =
+                    ClickHouseDBUtils.queryList(sql, new Object[]{}, StrategySystemDailyReportRow.class);
+            return rows == null ? Collections.<StrategySystemDailyReportRow>emptyList() : rows;
+        } catch (Exception e) {
+            log.error("queryReportRows error, sql:{}", sql, e);
+            return Collections.emptyList();
+        }
+    }
+
     private String safe(String value, String fallback) {
         if (StringUtils.isBlank(value)) {
             return fallback;
@@ -513,5 +583,15 @@ public class ClickHouseStrategySystemReportDao {
 
     private String escape(String value) {
         return value == null ? "" : value.replace("\\", "\\\\").replace("'", "''");
+    }
+
+    public static class StrategySystemDailyReportRow {
+        public String id;
+        public String reportDate;
+        public String generatedAt;
+        public String summaryJson;
+        public String htmlPath;
+        public String jsonPath;
+        public String payload;
     }
 }
