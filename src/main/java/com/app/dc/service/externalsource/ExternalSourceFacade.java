@@ -801,27 +801,17 @@ public class ExternalSourceFacade {
         Map<String, Object> pipelinePayload = payload == null
                 ? new LinkedHashMap<String, Object>()
                 : new LinkedHashMap<String, Object>(payload);
+        if (externalSourceDao.existsRawByExternalId(sourceType.name(), finalExternalId)
+                || externalSourceDao.existsRawByCanonicalUrl(sourceType.name(), canonicalUrl)
+                || externalSourceDao.existsSameRawContent(sourceType.name(), finalExternalId, contentHash)) {
+            log.info("persistRaw skip duplicate, sourceType:{}, externalId:{}, canonicalUrl:{}", sourceType.name(), finalExternalId, canonicalUrl);
+            return 0;
+        }
         String runId = ensurePipelineRunId(sourceType == null ? null : sourceType.name(),
                 finalExternalId,
                 null,
                 null,
                 pipelinePayload);
-        if (externalSourceDao.existsRawByExternalId(sourceType.name(), finalExternalId)
-                || externalSourceDao.existsRawByCanonicalUrl(sourceType.name(), canonicalUrl)
-                || externalSourceDao.existsSameRawContent(sourceType.name(), finalExternalId, contentHash)) {
-            log.info("persistRaw skip duplicate, sourceType:{}, externalId:{}, canonicalUrl:{}", sourceType.name(), finalExternalId, canonicalUrl);
-            markPipeline(sourceType == null ? null : sourceType.name(),
-                    finalExternalId,
-                    null,
-                    null,
-                    StrategyPipelineModels.DISCOVER,
-                    StrategyPipelineModels.SKIPPED,
-                    "DUPLICATE_RAW",
-                    null,
-                    pipelinePayload,
-                    runId);
-            return 0;
-        }
         RawRecord row = new RawRecord();
         row.id = "raw_" + ExternalSourceUtils.slug(sourceType.name().toLowerCase(Locale.ROOT), "src")
                 + "_" + System.currentTimeMillis()
@@ -846,16 +836,6 @@ public class ExternalSourceFacade {
         if (!inserted) {
             log.info("persistRaw skip duplicate by insert guard, sourceType:{}, externalId:{}, canonicalUrl:{}",
                     sourceType.name(), finalExternalId, canonicalUrl);
-            markPipeline(sourceType == null ? null : sourceType.name(),
-                    finalExternalId,
-                    null,
-                    null,
-                    StrategyPipelineModels.DISCOVER,
-                    StrategyPipelineModels.SKIPPED,
-                    "DUPLICATE_RAW",
-                    null,
-                    pipelinePayload,
-                    runId);
             return 0;
         }
         Map<String, Object> discoverPayload = new LinkedHashMap<String, Object>(pipelinePayload);

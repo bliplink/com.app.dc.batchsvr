@@ -138,9 +138,12 @@ public class ClickHouseStrategySystemReportDao {
         if (!ready()) {
             return Collections.emptyList();
         }
+        String endDate = nextDate(reportDate);
         String sql = "select toString(severity) as key1, fact_type as key2, count() as total from "
                 + safe(reviewFactTable, "dc.strategy_review_fact")
-                + " where trade_date >= toDate('" + escape(reportDate) + "') group by severity, fact_type order by severity desc, total desc";
+                + " where trade_date >= toDate('" + escape(reportDate) + "')"
+                + " and trade_date < toDate('" + escape(endDate) + "')"
+                + " group by severity, fact_type order by severity desc, total desc";
         return queryCountRows(sql);
     }
 
@@ -328,8 +331,11 @@ public class ClickHouseStrategySystemReportDao {
         if (rows == null || rows.isEmpty()) {
             return Collections.emptyList();
         }
-        List<BlockedRunRow> result = new java.util.ArrayList<BlockedRunRow>();
+        java.util.LinkedHashMap<String, BlockedRunRow> latest = new java.util.LinkedHashMap<String, BlockedRunRow>();
         for (PipelineBlockedRunRow row : rows) {
+            if (StringUtils.equalsAnyIgnoreCase(row.currentReason, "DUPLICATE_RAW", "DUPLICATE_NORM")) {
+                continue;
+            }
             BlockedRunRow item = new BlockedRunRow();
             item.runId = row.runId;
             item.sourceType = row.sourceType;
@@ -341,15 +347,20 @@ public class ClickHouseStrategySystemReportDao {
             item.currentReason = row.currentReason;
             item.updateTime = row.updateTime;
             item.payload = row.payload;
-            result.add(item);
+            String key = safeValue(row.strategyName) + "|" + safeValue(row.strategyVersion) + "|" + safeValue(row.currentStage) + "|" + safeValue(row.currentReason);
+            BlockedRunRow existing = latest.get(key);
+            if (existing == null || (item.updateTime != null && item.updateTime.compareTo(existing.updateTime) > 0)) {
+                latest.put(key, item);
+            }
         }
-        return result;
+        return new java.util.ArrayList<BlockedRunRow>(latest.values());
     }
 
     public List<RuntimeStrategyRow> loadRuntimeStrategyRows(String reportDate) {
         if (!ready()) {
             return Collections.emptyList();
         }
+        String endDate = nextDate(reportDate);
         String sql = "select strategyName as strategyName, strategyVersion as strategyVersion,"
                 + " sum(signalCount) as signalCount,"
                 + " sum(orderCount) as orderCount,"
@@ -360,20 +371,26 @@ public class ClickHouseStrategySystemReportDao {
                 + " select strategyName, strategyVersion, count() as signalCount, 0 as orderCount, 0 as tradeCount,"
                 + " 0.0 as realizedPnl, 0 as errorCount"
                 + " from " + safe(signalTable, "dc.signal")
-                + " where tradeDate >= toDate('" + escape(reportDate) + "') and strategyName != ''"
+                + " where tradeDate >= toDate('" + escape(reportDate) + "')"
+                + " and tradeDate < toDate('" + escape(endDate) + "')"
+                + " and strategyName != ''"
                 + " group by strategyName, strategyVersion"
                 + " union all "
                 + " select strategyName, strategyVersion, 0 as signalCount, count() as orderCount, 0 as tradeCount,"
                 + " 0.0 as realizedPnl, 0 as errorCount"
                 + " from " + safe(quantOrderLatestViewTable, "dc.quant_order_latest_view")
-                + " where tradeDate >= toDate('" + escape(reportDate) + "') and strategyName != ''"
+                + " where tradeDate >= toDate('" + escape(reportDate) + "')"
+                + " and tradeDate < toDate('" + escape(endDate) + "')"
+                + " and strategyName != ''"
                 + " and source in ('live', 'order_live')"
                 + " group by strategyName, strategyVersion"
                 + " union all "
                 + " select strategyName, strategyVersion, 0 as signalCount, 0 as orderCount, count() as tradeCount,"
                 + " sum(ifNull(realizedPnl, 0)) as realizedPnl, 0 as errorCount"
                 + " from " + safe(quantTradeLatestViewTable, "dc.quant_trade_latest_view")
-                + " where tradeDate >= toDate('" + escape(reportDate) + "') and strategyName != ''"
+                + " where tradeDate >= toDate('" + escape(reportDate) + "')"
+                + " and tradeDate < toDate('" + escape(endDate) + "')"
+                + " and strategyName != ''"
                 + " and source in ('live', 'order_live')"
                 + " group by strategyName, strategyVersion"
                 + " union all "
@@ -381,7 +398,9 @@ public class ClickHouseStrategySystemReportDao {
                 + " 0 as signalCount, 0 as orderCount, 0 as tradeCount,"
                 + " 0.0 as realizedPnl, count() as errorCount"
                 + " from " + safe(reviewFactTable, "dc.strategy_review_fact")
-                + " where trade_date >= toDate('" + escape(reportDate) + "') and severity > 0 and strategy_name != ''"
+                + " where trade_date >= toDate('" + escape(reportDate) + "')"
+                + " and trade_date < toDate('" + escape(endDate) + "')"
+                + " and severity > 0 and strategy_name != ''"
                 + " group by strategy_name, strategy_version"
                 + " ) x group by strategyName, strategyVersion"
                 + " order by realizedPnl desc, signalCount desc, strategyName asc";
@@ -399,6 +418,7 @@ public class ClickHouseStrategySystemReportDao {
         if (!ready()) {
             return Collections.emptyList();
         }
+        String endDate = nextDate(reportDate);
         String sql = "select "
                 + "strategy_name as strategyName,"
                 + "strategy_version as strategyVersion,"
@@ -410,6 +430,7 @@ public class ClickHouseStrategySystemReportDao {
                 + "payload as payload "
                 + "from " + safe(reviewFactTable, "dc.strategy_review_fact")
                 + " where trade_date >= toDate('" + escape(reportDate) + "')"
+                + " and trade_date < toDate('" + escape(endDate) + "')"
                 + " order by severity desc, strategy_name asc limit " + Math.max(1, limit);
         try {
             List<ReviewFactRow> rows = ClickHouseDBUtils.queryList(sql, new Object[]{}, ReviewFactRow.class);
@@ -581,10 +602,15 @@ public class ClickHouseStrategySystemReportDao {
         return trim;
     }
 
+    private String safeValue(String text) {
+        return text == null ? "" : text;
+    }
+
     private String escape(String value) {
         return value == null ? "" : value.replace("\\", "\\\\").replace("'", "''");
     }
 
+ 
     public static class StrategySystemDailyReportRow {
         public String id;
         public String reportDate;
@@ -594,4 +620,13 @@ public class ClickHouseStrategySystemReportDao {
         public String jsonPath;
         public String payload;
     }
+    private String nextDate(String date) {
+        try {
+            return java.time.LocalDate.parse(date).plusDays(1).toString();
+        } catch (Exception e) {
+            return date;
+        }
+ 
+    }
+   
 }

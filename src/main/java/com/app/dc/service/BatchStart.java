@@ -95,6 +95,9 @@ public class BatchStart implements CommandLineRunner {
 	@Value("${clickhouse.default:}")
 	private String clickHouseDefault;
 
+	@Value("${dbpool.default:}")
+	private String dbPoolDefault;
+
 	@Value("${external.source.enabled:true}")
 	private boolean externalSourceEnabled;
 
@@ -137,28 +140,33 @@ public class BatchStart implements CommandLineRunner {
 	@Override
 	public void run(String... args) throws Exception {
 		com.gateway.connector.utils.Consts.WaitTime = 120 * 1000;
-		IDatabaseConnection databaseConnection = new IDatabaseConnection() {
+		if (dbPoolEnabled()) {
+			IDatabaseConnection databaseConnection = new IDatabaseConnection() {
 
-			@Override
-			public Connection getConnection() {
-				try {
-					return DBUtils.dbpool.getLongConnection();
-				} catch (Exception e) {
-					return null;
+				@Override
+				public Connection getConnection() {
+					try {
+						return DBUtils.dbpool.getLongConnection();
+					} catch (Exception e) {
+						return null;
+					}
 				}
-			}
 
-			@Override
-			public void freeConnection(Connection connection) {
-				try {
-					DBUtils.dbpool.freeConnection(connection);
-				} catch (Exception e) {
+				@Override
+				public void freeConnection(Connection connection) {
+					try {
+						DBUtils.dbpool.freeConnection(connection);
+					} catch (Exception e) {
 
+					}
 				}
-			}
-		};
+			};
 
-		DBUtils.setDatabaseConnection(databaseConnection);
+			DBUtils.setDatabaseConnection(databaseConnection);
+			log.info("DBPOOL enabled, bound database connection for default source:{}", dbPoolDefault);
+		} else {
+			log.info("DBPOOL disabled, skip binding database connection. clickHouseDefault:{}", clickHouseDefault);
+		}
 		List<String> lt = dataFacade.getAllTSymbolCategory();
 		for (String symbolCategory : lt) {
 			String serverName = "Trade" + symbolCategory + "Svr";
@@ -268,10 +276,14 @@ public class BatchStart implements CommandLineRunner {
 	}
 
 	private void logExternalSourceConfig() {
-		log.info("external source config enabled:{} dispatchEnabled:{} clickHouseDefault:{} tradingViewEnabled:{} fmzEnabled:{} gitHubEnabled:{} tradingViewCron:{} fmzCron:{} gitHubCron:{} normalizeCron:{} dispatchCron:{} digestCron:{} systemReportEnabled:{} systemReportCron:{}",
-				externalSourceEnabled, externalSourceDispatchEnabled, clickHouseDefault, tradingViewEnabled, fmzEnabled,
+		log.info("external source config enabled:{} dispatchEnabled:{} dbPoolDefault:{} clickHouseDefault:{} tradingViewEnabled:{} fmzEnabled:{} gitHubEnabled:{} tradingViewCron:{} fmzCron:{} gitHubCron:{} normalizeCron:{} dispatchCron:{} digestCron:{} systemReportEnabled:{} systemReportCron:{}",
+				externalSourceEnabled, externalSourceDispatchEnabled, dbPoolDefault, clickHouseDefault, tradingViewEnabled, fmzEnabled,
 				gitHubEnabled, tradingViewCron, fmzCron, gitHubCron, externalNormalizeCron, externalDispatchCron,
 				externalDigestCron, strategySystemReportEnabled, strategySystemReportCron);
+	}
+
+	private boolean dbPoolEnabled() {
+		return dbPoolDefault != null && !dbPoolDefault.trim().isEmpty() && DBUtils.dbpool != null;
 	}
 
 }

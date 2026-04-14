@@ -57,7 +57,7 @@ public class StrategySystemDailyReportService {
         if (!enabled || !systemReportDao.ready()) {
             return "";
         }
-        LocalDate reportDate = LocalDate.now();
+        LocalDate reportDate = LocalDate.now().minusDays(1);
         String since = reportDate.atStartOfDay().format(TS);
         String reportId = "system_report_" + reportDate.toString().replace("-", "");
 
