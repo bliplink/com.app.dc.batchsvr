@@ -47,6 +47,10 @@ public class ExternalSourceRunHandler extends ContentHandler {
                 || "strategy_system_report".equalsIgnoreCase(action)) {
             return batchStart.runStrategySystemDailyReportJob(reportDate);
         }
+        if ("runtime_report".equalsIgnoreCase(action) || "system_runtime_report".equalsIgnoreCase(action)
+                || "strategy_system_runtime_report".equalsIgnoreCase(action)) {
+            return batchStart.runStrategySystemRuntimeReportJob();
+        }
         if ("discover_tradingview".equalsIgnoreCase(action)) {
             return batchStart.runTradingViewDiscoverJob();
         }

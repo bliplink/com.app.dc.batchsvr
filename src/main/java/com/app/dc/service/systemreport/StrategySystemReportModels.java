@@ -139,6 +139,18 @@ public final class StrategySystemReportModels {
         public List<ReviewFactRow> topReviewFacts = new ArrayList<ReviewFactRow>();
     }
 
+    public static class RuntimeReportSummary {
+        public String reportId;
+        public String reportDate;
+        public String snapshotTime;
+        public Map<String, Object> headline = new LinkedHashMap<String, Object>();
+        public List<ActiveLiveRow> activeLives = new ArrayList<ActiveLiveRow>();
+        public List<RuntimeStrategyRow> runtimeRows = new ArrayList<RuntimeStrategyRow>();
+        public List<GenerationDetailRow> runningGenerationTasks = new ArrayList<GenerationDetailRow>();
+        public List<BacktestDetailRow> runningBacktestTasks = new ArrayList<BacktestDetailRow>();
+        public List<BlockedRunRow> blockedRuns = new ArrayList<BlockedRunRow>();
+    }
+
     public static class ReportFiles {
         public String jsonPath;
         public String htmlPath;
