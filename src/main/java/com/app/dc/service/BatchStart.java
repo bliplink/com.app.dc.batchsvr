@@ -248,6 +248,13 @@ public class BatchStart implements CommandLineRunner {
 		return path;
 	}
 
+	public String runStrategySystemDailyReportJob(String reportDate) {
+		log.info("runStrategySystemDailyReportJob start, reportDate:{}", reportDate);
+		String path = strategySystemDailyReportService.generateDailyReport(reportDate);
+		log.info("runStrategySystemDailyReportJob end, reportDate:{}, report:{}", reportDate, path);
+		return path;
+	}
+
 	private void registerExternalSourceJobs() {
 		if (!externalSourceEnabled) {
 			log.info("external source jobs skipped, enabled:false");

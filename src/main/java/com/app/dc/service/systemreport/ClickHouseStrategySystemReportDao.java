@@ -183,18 +183,18 @@ public class ClickHouseStrategySystemReportDao {
                 + "max(update_time) as updateTime "
                 + "from " + table + " group by id";
         String sql = "select "
-                + "sourceType as sourceType,"
-                + "siteName as siteName,"
-                + "strategyName as strategyName,"
+                + "latest.sourceType as sourceType,"
+                + "latest.siteName as siteName,"
+                + "latest.strategyName as strategyName,"
                 + "'' as strategyVersion,"
-                + "scene as scene,"
-                + "status as status,"
-                + "normalizedTitle as normalizedTitle,"
-                + "canonicalUrl as canonicalUrl,"
-                + "toString(updateTime) as updateTime "
+                + "latest.scene as scene,"
+                + "latest.status as status,"
+                + "latest.normalizedTitle as normalizedTitle,"
+                + "latest.canonicalUrl as canonicalUrl,"
+                + "toString(latest.updateTime) as updateTime "
                 + "from (" + inner + ") latest "
-                + "where updateTime >= toDateTime('" + escape(since) + "') "
-                + "order by updateTime desc limit " + Math.max(1, limit);
+                + "where latest.updateTime >= toDateTime('" + escape(since) + "') "
+                + "order by latest.updateTime desc limit " + Math.max(1, limit);
         try {
             List<NormDetailRow> rows = ClickHouseDBUtils.queryList(sql, new Object[]{}, NormDetailRow.class);
             return rows == null ? Collections.<NormDetailRow>emptyList() : rows;
@@ -220,16 +220,16 @@ public class ClickHouseStrategySystemReportDao {
                 + "from " + safe(generationTaskTable, "dc.strategy_generation_task")
                 + " group by id";
         String sql = "select "
-                + "sourceType as sourceType,"
-                + "strategyName as strategyName,"
-                + "strategyVersion as strategyVersion,"
-                + "scene as scene,"
-                + "status as status,"
-                + "compileStatus as compileStatus,"
-                + "toString(updateTime) as updateTime "
+                + "latest.sourceType as sourceType,"
+                + "latest.strategyName as strategyName,"
+                + "latest.strategyVersion as strategyVersion,"
+                + "latest.scene as scene,"
+                + "latest.status as status,"
+                + "latest.compileStatus as compileStatus,"
+                + "toString(latest.updateTime) as updateTime "
                 + "from (" + inner + ") latest "
-                + "where updateTime >= toDateTime('" + escape(since) + "') "
-                + "order by updateTime desc limit " + Math.max(1, limit);
+                + "where latest.updateTime >= toDateTime('" + escape(since) + "') "
+                + "order by latest.updateTime desc limit " + Math.max(1, limit);
         try {
             List<GenerationDetailRow> rows = ClickHouseDBUtils.queryList(sql, new Object[]{}, GenerationDetailRow.class);
             return rows == null ? Collections.<GenerationDetailRow>emptyList() : rows;
@@ -255,16 +255,16 @@ public class ClickHouseStrategySystemReportDao {
                 + "from " + safe(backtestTaskTable, "dc.strategy_backtest_task")
                 + " group by id";
         String sql = "select "
-                + "strategyName as strategyName,"
-                + "strategyVersion as strategyVersion,"
-                + "baselineVersion as baselineVersion,"
-                + "taskType as taskType,"
-                + "status as status,"
-                + "suspendReason as suspendReason,"
-                + "toString(updateTime) as updateTime "
+                + "latest.strategyName as strategyName,"
+                + "latest.strategyVersion as strategyVersion,"
+                + "latest.baselineVersion as baselineVersion,"
+                + "latest.taskType as taskType,"
+                + "latest.status as status,"
+                + "latest.suspendReason as suspendReason,"
+                + "toString(latest.updateTime) as updateTime "
                 + "from (" + inner + ") latest "
-                + "where updateTime >= toDateTime('" + escape(since) + "') "
-                + "order by updateTime desc limit " + Math.max(1, limit);
+                + "where latest.updateTime >= toDateTime('" + escape(since) + "') "
+                + "order by latest.updateTime desc limit " + Math.max(1, limit);
         try {
             List<BacktestDetailRow> rows = ClickHouseDBUtils.queryList(sql, new Object[]{}, BacktestDetailRow.class);
             return rows == null ? Collections.<BacktestDetailRow>emptyList() : rows;
@@ -365,19 +365,19 @@ public class ClickHouseStrategySystemReportDao {
                 + " sum(signalCount) as signalCount,"
                 + " sum(orderCount) as orderCount,"
                 + " sum(tradeCount) as tradeCount,"
-                + " round(sum(realizedPnl), 8) as realizedPnl,"
+                + " round(toFloat64(sum(realizedPnl)), 8) as realizedPnl,"
                 + " sum(errorCount) as errorCount"
                 + " from ("
-                + " select strategyName, strategyVersion, count() as signalCount, 0 as orderCount, 0 as tradeCount,"
-                + " 0.0 as realizedPnl, 0 as errorCount"
+                + " select strategyName, strategyVersion, toInt64(count()) as signalCount, toInt64(0) as orderCount, toInt64(0) as tradeCount,"
+                + " toFloat64(0) as realizedPnl, toInt64(0) as errorCount"
                 + " from " + safe(signalTable, "dc.signal")
                 + " where tradeDate >= toDate('" + escape(reportDate) + "')"
                 + " and tradeDate < toDate('" + escape(endDate) + "')"
                 + " and strategyName != ''"
                 + " group by strategyName, strategyVersion"
                 + " union all "
-                + " select strategyName, strategyVersion, 0 as signalCount, count() as orderCount, 0 as tradeCount,"
-                + " 0.0 as realizedPnl, 0 as errorCount"
+                + " select strategyName, strategyVersion, toInt64(0) as signalCount, toInt64(count()) as orderCount, toInt64(0) as tradeCount,"
+                + " toFloat64(0) as realizedPnl, toInt64(0) as errorCount"
                 + " from " + safe(quantOrderLatestViewTable, "dc.quant_order_latest_view")
                 + " where tradeDate >= toDate('" + escape(reportDate) + "')"
                 + " and tradeDate < toDate('" + escape(endDate) + "')"
@@ -385,8 +385,8 @@ public class ClickHouseStrategySystemReportDao {
                 + " and source in ('live', 'order_live')"
                 + " group by strategyName, strategyVersion"
                 + " union all "
-                + " select strategyName, strategyVersion, 0 as signalCount, 0 as orderCount, count() as tradeCount,"
-                + " sum(ifNull(realizedPnl, 0)) as realizedPnl, 0 as errorCount"
+                + " select strategyName, strategyVersion, toInt64(0) as signalCount, toInt64(0) as orderCount, toInt64(count()) as tradeCount,"
+                + " toFloat64(sum(ifNull(realizedPnl, toDecimal64(0, 12)))) as realizedPnl, toInt64(0) as errorCount"
                 + " from " + safe(quantTradeLatestViewTable, "dc.quant_trade_latest_view")
                 + " where tradeDate >= toDate('" + escape(reportDate) + "')"
                 + " and tradeDate < toDate('" + escape(endDate) + "')"
@@ -395,8 +395,8 @@ public class ClickHouseStrategySystemReportDao {
                 + " group by strategyName, strategyVersion"
                 + " union all "
                 + " select strategy_name as strategyName, strategy_version as strategyVersion,"
-                + " 0 as signalCount, 0 as orderCount, 0 as tradeCount,"
-                + " 0.0 as realizedPnl, count() as errorCount"
+                + " toInt64(0) as signalCount, toInt64(0) as orderCount, toInt64(0) as tradeCount,"
+                + " toFloat64(0) as realizedPnl, toInt64(count()) as errorCount"
                 + " from " + safe(reviewFactTable, "dc.strategy_review_fact")
                 + " where trade_date >= toDate('" + escape(reportDate) + "')"
                 + " and trade_date < toDate('" + escape(endDate) + "')"

@@ -28,7 +28,9 @@ public class ExternalSourceRunHandler extends ContentHandler {
             @SuppressWarnings("unchecked")
             LinkedHashMap<String, Object> request = JsonUtils.Deserialize(content, LinkedHashMap.class);
             String action = request == null || request.get("action") == null ? "" : request.get("action").toString();
-            Object data = runAction(action);
+            String reportDate = request == null || request.get("reportDate") == null
+                    ? "" : request.get("reportDate").toString().trim();
+            Object data = runAction(action, reportDate);
             result.put(Consts.Code, Consts.SuccessCode);
             result.put(Consts.Msg, Consts.SuccessMsg);
             result.put(Consts.DATA, data);
@@ -40,10 +42,10 @@ public class ExternalSourceRunHandler extends ContentHandler {
         return result;
     }
 
-    private Object runAction(String action) {
+    private Object runAction(String action, String reportDate) {
         if ("system_report".equalsIgnoreCase(action) || "daily_report".equalsIgnoreCase(action)
                 || "strategy_system_report".equalsIgnoreCase(action)) {
-            return batchStart.runStrategySystemDailyReportJob();
+            return batchStart.runStrategySystemDailyReportJob(reportDate);
         }
         if ("discover_tradingview".equalsIgnoreCase(action)) {
             return batchStart.runTradingViewDiscoverJob();

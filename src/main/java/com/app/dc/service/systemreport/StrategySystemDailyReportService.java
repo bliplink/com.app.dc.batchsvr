@@ -54,10 +54,16 @@ public class StrategySystemDailyReportService {
     private int detailLimit;
 
     public String generateDailyReport() {
+        return generateDailyReport(null);
+    }
+
+    public String generateDailyReport(String reportDateText) {
         if (!enabled || !systemReportDao.ready()) {
             return "";
         }
-        LocalDate reportDate = LocalDate.now().minusDays(1);
+        LocalDate reportDate = StringUtils.isBlank(reportDateText)
+                ? LocalDate.now().minusDays(1)
+                : LocalDate.parse(reportDateText.trim());
         String since = reportDate.atStartOfDay().format(TS);
         String reportId = "system_report_" + reportDate.toString().replace("-", "");
 
@@ -91,7 +97,7 @@ public class StrategySystemDailyReportService {
         summary.headline.put("backtestSuccessTotal", sumByStatus(summary.backtestCounts, "SUCCESS"));
         summary.headline.put("optimizationTrialTotal", sum(summary.optimizationCounts));
         summary.headline.put("publishEventTotal", sum(summary.releaseCounts));
-        summary.headline.put("pipelineBlockedTotal", summary.blockedRuns.size());
+        summary.headline.put("pipelineBlockedTotal", countBlockedFailures(summary.blockedRuns));
         summary.headline.put("activeLiveTotal", summary.activeLives.size());
         summary.headline.put("runtimeSignalTotal", sumRuntime(summary.runtimeRows, "signal"));
         summary.headline.put("runtimeOrderTotal", sumRuntime(summary.runtimeRows, "order"));
@@ -168,7 +174,7 @@ public class StrategySystemDailyReportService {
         appendCountTable(html, "流水线当前状态", summary.pipelineCounts, "阶段", "状态", "数量");
         appendActiveLives(html, summary.activeLives);
         appendRuntimeRows(html, summary.runtimeRows);
-        appendBlockedRuns(html, summary.blockedRuns);
+        appendBlockedRunsUtf8(html, summary.blockedRuns);
         appendCountTable(html, "实盘复盘异常统计", summary.reviewFactCounts, "严重级别", "事实类型", "数量");
         appendReviewFacts(html, summary.topReviewFacts);
         html.append("</body></html>");
@@ -334,6 +340,81 @@ public class StrategySystemDailyReportService {
         html.append("<h2>当前卡点策略</h2><table><tr><th>runId</th><th>来源</th><th>策略</th><th>版本</th><th>当前阶段</th><th>状态</th><th>原因</th><th>更新时间</th></tr>");
         if (rows == null || rows.isEmpty()) {
             html.append("<tr><td colspan='8'>当前没有 FAILED / SKIPPED / SUSPENDED 的流水线</td></tr>");
+        } else {
+            for (BlockedRunRow row : rows) {
+                html.append("<tr><td>").append(escape(row.runId)).append("</td><td>")
+                        .append(escape(row.sourceType)).append("</td><td>")
+                        .append(escape(row.strategyName)).append("</td><td>")
+                        .append(escape(row.strategyVersion)).append("</td><td>")
+                        .append(escape(row.currentStage)).append("</td><td class='")
+                        .append(cssStatus(row.currentStatus)).append("'>")
+                        .append(escape(row.currentStatus)).append("</td><td>")
+                        .append(escape(row.currentReason)).append("</td><td>")
+                        .append(escape(row.updateTime)).append("</td></tr>");
+            }
+        }
+        html.append("</table>");
+    }
+
+    private void appendBlockedRunsV2(StringBuilder html, List<BlockedRunRow> rows) {
+        List<BlockedRunRow> failureRows = new ArrayList<BlockedRunRow>();
+        List<BlockedRunRow> skippedRows = new ArrayList<BlockedRunRow>();
+        if (rows != null) {
+            for (BlockedRunRow row : rows) {
+                if (isExpectedSkip(row)) {
+                    skippedRows.add(row);
+                } else {
+                    failureRows.add(row);
+                }
+            }
+        }
+        appendBlockedRunTable(html, "褰撳墠闈炴垚鍔熺姸鎬佺瓥鐣?", failureRows,
+                "褰撳墠娌℃湁 FAILED / SUSPENDED 鎴栭渶瑕佷汉宸ュ叧娉ㄧ殑闈炴垚鍔熺姸鎬佺瓥鐣?");
+        appendBlockedRunTable(html, "褰撳墠姝ｅ父璺宠繃绛栫暐", skippedRows,
+                "褰撳墠娌℃湁姝ｅ父璺宠繃鐨勭瓥鐣?锛堝鏃犳垚浜ゃ€佹棤淇″彿绛夛級");
+    }
+
+    private void appendBlockedRunTable(StringBuilder html, String title, List<BlockedRunRow> rows, String emptyText) {
+        html.append("<h2>").append(escape(title))
+                .append("</h2><table><tr><th>runId</th><th>鏉ユ簮</th><th>绛栫暐</th><th>鐗堟湰</th><th>褰撳墠闃舵</th><th>鐘舵€?/th><th>鍘熷洜</th><th>鏇存柊鏃堕棿</th></tr>");
+        if (rows == null || rows.isEmpty()) {
+            html.append("<tr><td colspan='8'>").append(escape(emptyText)).append("</td></tr>");
+        } else {
+            for (BlockedRunRow row : rows) {
+                html.append("<tr><td>").append(escape(row.runId)).append("</td><td>")
+                        .append(escape(row.sourceType)).append("</td><td>")
+                        .append(escape(row.strategyName)).append("</td><td>")
+                        .append(escape(row.strategyVersion)).append("</td><td>")
+                        .append(escape(row.currentStage)).append("</td><td class='")
+                        .append(cssStatus(row.currentStatus)).append("'>")
+                        .append(escape(row.currentStatus)).append("</td><td>")
+                        .append(escape(row.currentReason)).append("</td><td>")
+                        .append(escape(row.updateTime)).append("</td></tr>");
+            }
+        }
+        html.append("</table>");
+    }
+
+    private void appendBlockedRunsUtf8(StringBuilder html, List<BlockedRunRow> rows) {
+        List<BlockedRunRow> failureRows = new ArrayList<BlockedRunRow>();
+        if (rows != null) {
+            for (BlockedRunRow row : rows) {
+                if (!isExpectedSkip(row)) {
+                    failureRows.add(row);
+                }
+            }
+        }
+        appendBlockedRunTableUtf8(html,
+                "\u5f53\u524d\u5931\u8d25/\u5f02\u5e38\u7b56\u7565",
+                failureRows,
+                "\u5f53\u524d\u6ca1\u6709 FAILED / SUSPENDED \u7684\u7b56\u7565\u6d41\u6c34\u7ebf\u5f02\u5e38");
+    }
+
+    private void appendBlockedRunTableUtf8(StringBuilder html, String title, List<BlockedRunRow> rows, String emptyText) {
+        html.append("<h2>").append(escape(title))
+                .append("</h2><table><tr><th>runId</th><th>\u6765\u6e90</th><th>\u7b56\u7565</th><th>\u7248\u672c</th><th>\u5f53\u524d\u9636\u6bb5</th><th>\u72b6\u6001</th><th>\u539f\u56e0</th><th>\u66f4\u65b0\u65f6\u95f4</th></tr>");
+        if (rows == null || rows.isEmpty()) {
+            html.append("<tr><td colspan='8'>").append(escape(emptyText)).append("</td></tr>");
         } else {
             for (BlockedRunRow row : rows) {
                 html.append("<tr><td>").append(escape(row.runId)).append("</td><td>")
@@ -516,6 +597,19 @@ public class StrategySystemDailyReportService {
         return total;
     }
 
+    private long countBlockedFailures(List<BlockedRunRow> rows) {
+        long total = 0L;
+        if (rows == null) {
+            return total;
+        }
+        for (BlockedRunRow row : rows) {
+            if (!isExpectedSkip(row)) {
+                total++;
+            }
+        }
+        return total;
+    }
+
     private double sumRuntimePnl(List<RuntimeStrategyRow> rows) {
         double total = 0D;
         if (rows == null) {
@@ -550,6 +644,17 @@ public class StrategySystemDailyReportService {
             return "warn";
         }
         return "bad";
+    }
+
+    private boolean isExpectedSkip(BlockedRunRow row) {
+        if (row == null || !StringUtils.equalsIgnoreCase(row.currentStatus, "SKIPPED")) {
+            return false;
+        }
+        return StringUtils.equalsAnyIgnoreCase(row.currentReason,
+                "no trades on trade date",
+                "no signals on trade date",
+                "no orders on trade date",
+                "ALGO_UNCHANGED");
     }
 
     private String scale(Double value) {
